@@ -110,6 +110,9 @@ async function lookup(url, request, env) {
   if (address.length < 5) {
     return reply(400, { error: 'bad_address', message: 'Please enter a full street address, including city and state or ZIP code.' });
   }
+  if (/^\d{5}(-\d{4})?$/.test(address)) {
+    return reply(400, { error: 'zip_only', message: "A ZIP code alone isn't enough, because many ZIP codes cross district lines. Please enter a full street address, such as 123 Main St, Springfield, IL 62701." });
+  }
   if (address.length > 200) {
     return reply(400, { error: 'bad_address', message: 'That address is too long.' });
   }

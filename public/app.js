@@ -234,9 +234,13 @@ function districtLabel(info, member) {
 function showMember(info, member) {
   const [last, first] = (member.name || '').split(', ');
   const name = first ? `${first} ${last}` : member.name;
-  const delegate = info.stateCode === '11' || Number(info.stateCode) >= 60;
+  // DC and the territories send non-voting members. Puerto Rico's is called
+  // the Resident Commissioner; the others are Delegates.
+  const title = info.stateCode === '72' ? 'Resident Commissioner'
+    : (info.stateCode === '11' || Number(info.stateCode) >= 60) ? 'Delegate'
+    : 'Representative';
 
-  $('rep-role').textContent = `${delegate ? 'Delegate' : 'Representative'} for ${districtLabel(info, member)}`;
+  $('rep-role').textContent = `${title} for ${districtLabel(info, member)}`;
   $('rep-name').textContent = name;
   $('rep-party').textContent = member.party || '';
   $('rep-address').textContent = info.matchedAddress ? `Matched address: ${info.matchedAddress}` : '';
@@ -250,6 +254,17 @@ function showMember(info, member) {
   $('c-web').replaceChildren(member.website
     ? el('a', { href: member.website, target: '_blank', rel: 'noopener' }, member.website.replace(/^https?:\/\//, '').replace(/\/$/, ''))
     : 'Not listed');
+}
+
+// Alaska's Aleutian Islands cross the 180° line, where longitude jumps from
+// +180 to -180. Seen as-is, the district seems to stretch around the whole
+// globe. If a shape spans more than half the world, move its eastern points
+// 360° west so it reads as one piece (the map draws longitudes past -180 fine).
+function crossDateLine(shape) {
+  const lons = shape.geometry.coordinates.flat(2).map(pt => pt[0]);
+  if (Math.max(...lons) - Math.min(...lons) <= 180) return shape;
+  const shift = ring => ring.map(([lon, lat]) => [lon > 0 ? lon - 360 : lon, lat]);
+  return { ...shape, geometry: { ...shape.geometry, coordinates: shape.geometry.coordinates.map(poly => poly.map(shift)) } };
 }
 
 async function showMap(info) {
@@ -280,7 +295,7 @@ async function showMap(info) {
 
   try {
     const q = new URLSearchParams({ geoid: info.geoid, layer: info.districtSource || '' });
-    const shape = await getJson(`/api/district?${q}`);
+    const shape = crossDateLine(await getJson(`/api/district?${q}`));
     map.addSource('district', { type: 'geojson', data: shape });
     map.addLayer({ id: 'district-fill', type: 'fill', source: 'district', paint: { 'fill-color': '#0B5D5E', 'fill-opacity': 0.12 } });
     map.addLayer({ id: 'district-line', type: 'line', source: 'district', paint: { 'line-color': '#0B5D5E', 'line-width': 2.5 } });
