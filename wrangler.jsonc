@@ -13,6 +13,12 @@
   "workers_dev": true,
   "preview_urls": false,
 
+   // Your own domain. Cloudflare creates the DNS records and certificate.
+  "routes": [
+    { "pattern": "reptracker.us.com", "custom_domain": true },
+    { "pattern": "www.reptracker.us.com", "custom_domain": true }
+  ],
+
   // Before testing or publishing, copy the latest data into public/data/.
   "build": {
     "command": "node scripts/copy-data.mjs"
