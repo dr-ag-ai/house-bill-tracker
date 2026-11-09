@@ -1,0 +1,21 @@
+// ============================================================================
+// Cloudflare settings for the House Bill Tracker.
+// "wrangler" is Cloudflare's tool for testing and publishing the site.
+// ============================================================================
+{
+  "name": "house-bill-tracker",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-06-01",
+
+  // Before testing or publishing, copy the latest data into public/data/.
+  "build": {
+    "command": "node scripts/copy-data.mjs"
+  },
+
+  // Everything in public/ (the webpage and the data) is served as-is.
+  // Anything else, such as /api/lookup, goes to worker/index.js.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  }
+}

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>House Bill Tracker — test page</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    input { width: 100%; padding: .6rem; font-size: 1rem; box-sizing: border-box; }
+    button { margin-top: .6rem; padding: .6rem 1.2rem; font-size: 1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; white-space: pre-wrap; }
+    .note { color: #666; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>House Bill Tracker</h1>
+  <p class="note">Temporary test page for Phase 4. The real page is built in Phase 5.</p>
+
+  <form id="f">
+    <label for="a">Enter a US street address</label>
+    <input id="a" value="350 Fifth Avenue, New York, NY 10118" autocomplete="street-address">
+    <button>Look up</button>
+  </form>
+
+  <h2>Back end answer</h2>
+  <pre id="out">(nothing yet)</pre>
+
+  <h2>Representative file (first part)</h2>
+  <pre id="rep">(nothing yet)</pre>
+
+  <script>
+    document.getElementById('f').addEventListener('submit', async e => {
+      e.preventDefault();
+      const out = document.getElementById('out'), rep = document.getElementById('rep');
+      out.textContent = 'Looking up...'; rep.textContent = '';
+      const res = await fetch('/api/lookup?address=' + encodeURIComponent(document.getElementById('a').value));
+      const json = await res.json();
+      out.textContent = 'Status ' + res.status + '\n' + JSON.stringify(json, null, 2);
+      if (json.representative) {
+        const m = await (await fetch('/data/members/' + json.representative.bioguideId + '.json')).json();
+        rep.textContent = JSON.stringify({
+          name: m.name, party: m.party, state: m.state, district: m.district,
+          photo: m.photo, phone: m.phone, website: m.website, office: m.office,
+          sponsoredBills: m.sponsored.length, votesCast: Object.keys(m.votes).length,
+        }, null, 2);
+      }
+    });
+  </script>
+</body>
+</html>
