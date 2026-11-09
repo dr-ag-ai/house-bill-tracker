@@ -1,0 +1,52 @@
+# ============================================================================
+# House Bill Tracker — runs the nightly data job on GitHub
+# ----------------------------------------------------------------------------
+# Every night, GitHub starts a fresh computer, downloads your project, runs
+# scripts/nightly.mjs, and saves any new data back into the project.
+# You can also start it by hand: Actions tab -> "Nightly data update" ->
+# "Run workflow".
+# ============================================================================
+
+name: Nightly data update
+
+on:
+  schedule:
+    - cron: '17 9 * * *'   # every day at 9:17 UTC (about 4:17 am US Eastern)
+  workflow_dispatch:       # adds the "Run workflow" button
+
+permissions:
+  contents: write          # lets the job save the new data into the project
+
+concurrency:
+  group: nightly-data      # never run two updates at the same time
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download the project
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Get the latest data from Congress.gov
+        run: node scripts/nightly.mjs
+        env:
+          CONGRESS_API_KEY: ${{ secrets.CONGRESS_API_KEY }}
+
+      - name: Save any changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "Nothing new tonight."
+          else
+            git commit -m "Nightly data update"
+            git push
+          fi
