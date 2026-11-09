@@ -3,20 +3,30 @@
 // ----------------------------------------------------------------------------
 // What this does, in plain English:
 //   1. Gets the list of everyone currently serving in the US House.
-//   2. For each of them, gets their contact details and the bills they sponsored.
-//   3. Gets every House roll-call vote since 2023, and how each member voted.
+//   2. Gets every House roll-call vote since 2023, and how each member voted.
 //      Votes already downloaded on a previous night are remembered (cached),
-//      so after the first run only NEW votes are downloaded.
-//   4. Looks up the title and subject of each bill that was voted on.
+//      so only NEW votes are downloaded.
+//   3. Looks up the title and subject of each bill that was voted on.
+//   4. For each representative, gets their contact details and the bills
+//      they sponsored. These change slowly, so each representative is
+//      refreshed once a week (a seventh of the House each night).
 //   5. Saves the results as small files the website reads:
 //        data/index.json          which representative serves which district
 //        data/votes.json          every House vote: date, question, which bill
 //        data/bills.json          title and subject of every bill voted on
 //        data/members/<ID>.json   one per representative: contact details,
 //                                 sponsored bills, and how they voted
-//      Shared information (vote descriptions, bill titles) is stored once,
-//      not copied into all 435 representative files. That keeps the data
-//      small. The website puts the pieces together for the visitor.
+//
+// Two safety features:
+//   - TIME BUDGET. Congress.gov can be slow. The script stops starting new
+//     downloads after a set time (2.5 hours by default), saves everything it
+//     has, and finishes cleanly. The next run carries on where it stopped.
+//     So a big backlog (like the very first run) is spread over a few nights,
+//     and no run ever loses its work.
+//   - SEVERAL DOWNLOADS AT ONCE. Each answer from Congress.gov can take
+//     several seconds, so the script keeps a few requests going at the same
+//     time, while still staying under Congress.gov's limit of about
+//     5,000 requests per hour.
 //
 // How to run it:
 //   Test mode (one representative, 15 recent votes, saves into data-test/):
@@ -25,9 +35,10 @@
 //       node scripts/nightly.mjs --test --member=V000081
 //   Nightly run (saves into data/):
 //       node scripts/nightly.mjs
-//   Refresh every representative's details and sponsored bills at once
-//   (normally a seventh of them are refreshed each night):
+//   Refresh every representative's details and sponsored bills at once:
 //       node scripts/nightly.mjs --refresh-all
+//   Use a different time budget, in minutes:
+//       node scripts/nightly.mjs --minutes=60
 //
 // It needs your Congress.gov key in an environment variable named
 // CONGRESS_API_KEY. It never prints or saves the key.
@@ -42,32 +53,42 @@ const API = 'https://api.congress.gov/v3';
 const KEY = process.env.CONGRESS_API_KEY;
 
 const args = process.argv.slice(2);
+const arg = name => args.find(a => a.startsWith(`--${name}=`))?.split('=')[1];
 const TEST = args.includes('--test');
-const memberArg = args.find(a => a.startsWith('--member='));
-const ONLY_MEMBER = memberArg ? memberArg.split('=')[1] : (TEST ? 'N000002' : null);
+const ONLY_MEMBER = arg('member') || (TEST ? 'N000002' : null);
 const TEST_VOTE_COUNT = 15;
 const REFRESH_ALL = args.includes('--refresh-all');
 
-// Splits representatives into 7 groups, one refreshed each night.
-const weekdaySlot = id => [...id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % 7;
-const todaySlot = () => Math.floor(Date.now() / 864e5) % 7;
+// Stop starting new downloads after this many minutes, then save and finish.
+// GitHub stops the whole job at 4 hours, so 2.5 hours leaves plenty of room.
+const BUDGET_MINUTES = Number(arg('minutes') || 150);
+
+// Congress.gov allows about 5,000 requests per hour. Starting a request at
+// most every 0.75 seconds keeps us under that (at most about 4,800 per hour).
+const PAUSE_MS = 750;
+// How many requests may be waiting for an answer at the same time.
+const AT_ONCE = 6;
+
+// House vote data on Congress.gov starts with the 118th Congress (2023).
+const FIRST_CONGRESS_WITH_VOTES = 118;
 
 // Test output goes in a separate folder so it never mixes with the real data.
 const OUT = path.resolve(TEST ? 'data-test' : 'data');
 const CACHE = path.join(OUT, 'cache');
 
-// Congress.gov allows about 5,000 requests per hour. Waiting 0.75 seconds
-// between requests keeps us safely under that (about 4,800 per hour).
-const PAUSE_MS = 750;
-
-// House vote data on Congress.gov starts with the 118th Congress (2023).
-const FIRST_CONGRESS_WITH_VOTES = 118;
+// Splits representatives into 7 groups, one refreshed each night.
+const weekdaySlot = id => [...id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % 7;
+const todaySlot = () => Math.floor(Date.now() / 864e5) % 7;
 
 // ---------- Small helpers ---------------------------------------------------
 
+const started = Date.now();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = (...m) => console.log(...m);
 const toArray = x => (Array.isArray(x) ? x : x == null ? [] : [x]);
+const minutesSoFar = () => ((Date.now() - started) / 60000).toFixed(1);
+const outOfTime = () => !TEST && Date.now() - started > BUDGET_MINUTES * 60000;
+let stoppedEarly = false;
 
 async function readJson(file) {
   try { return JSON.parse(await readFile(file, 'utf8')); } catch { return null; }
@@ -83,6 +104,20 @@ async function writeJson(file, data) {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, text);
   return true;
+}
+
+// Runs "work" on every item, a few at a time. Stops starting new items once
+// the time budget is used up; items already started are allowed to finish.
+async function eachAtOnce(items, work) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      if (outOfTime()) { stoppedEarly = true; return; }
+      const item = items[next++];
+      await work(item);
+    }
+  };
+  await Promise.all(Array.from({ length: AT_ONCE }, worker));
 }
 
 // "2025-03-14" or "2025-03-14T18:30:00-04:00"  ->  "03/2025"
@@ -134,11 +169,19 @@ const STATE_FIPS = {
 
 // ---------- Talking to Congress.gov ----------------------------------------
 
-let lastCall = 0;
+let nextStart = 0;
 let requestCount = 0;
 
-// Asks Congress.gov one question. Waits politely between requests, and
-// retries a few times if the site is busy. Returns null for "not found".
+// Waits for this request's turn: requests start at least PAUSE_MS apart.
+async function waitTurn() {
+  const at = Math.max(Date.now(), nextStart);
+  nextStart = at + PAUSE_MS;
+  const wait = at - Date.now();
+  if (wait > 0) await sleep(wait);
+}
+
+// Asks Congress.gov one question. Retries a few times if the site is busy
+// or slow. Returns null for "not found".
 async function api(apiPath, params = {}) {
   const url = new URL(API + apiPath);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
@@ -146,19 +189,17 @@ async function api(apiPath, params = {}) {
   url.searchParams.set('api_key', KEY);
 
   for (let attempt = 1; attempt <= 5; attempt++) {
-    const wait = lastCall + PAUSE_MS - Date.now();
-    if (wait > 0) await sleep(wait);
-    lastCall = Date.now();
+    await waitTurn();
     requestCount++;
 
     let res = null;
-    try { res = await fetch(url); } catch { /* network hiccup; retry below */ }
+    try { res = await fetch(url, { signal: AbortSignal.timeout(60_000) }); } catch { /* network hiccup or no answer in 60s; retry below */ }
     if (res && res.ok) return res.json();
-    if (res && res.status === 404) return null;
+    if (res && (res.status === 404 || res.status === 400)) return null;
     if (res && (res.status === 401 || res.status === 403)) {
       throw new Error('Congress.gov rejected the API key. Check that CONGRESS_API_KEY is set correctly.');
     }
-    const why = res ? `status ${res.status}` : 'network error';
+    const why = res ? `status ${res.status}` : 'no answer';
     const delay = res && res.status === 429 ? 60_000 : 5_000 * attempt;
     log(`   (${why} on ${apiPath}; trying again in ${delay / 1000}s)`);
     await sleep(delay);
@@ -215,7 +256,99 @@ async function getHouseMembers() {
   return house;
 }
 
-// ---------- Step 2: contact details and sponsored bills ---------------------
+// ---------- Step 2: House votes (cached) ------------------------------------
+
+async function getVotes() {
+  log('Step 2: Getting House votes...');
+  const latest = currentCongress() + 1; // also catches a new Congress starting
+  let list = [];
+  for (let c = FIRST_CONGRESS_WITH_VOTES; c <= latest; c++) {
+    const votes = await apiAll(`/house-vote/${c}`, 'houseRollCallVotes');
+    for (const v of votes) list.push({ ...v, congress: v.congress ?? c });
+  }
+  log(`   Found ${list.length} House votes since 2023.`);
+
+  // Newest first, so if time runs short the most recent votes come first.
+  list.sort((a, b) =>
+    (b.congress - a.congress) ||
+    ((b.sessionNumber ?? 0) - (a.sessionNumber ?? 0)) ||
+    ((b.rollCallNumber ?? 0) - (a.rollCallNumber ?? 0)));
+  if (TEST) {
+    list = list.slice(0, TEST_VOTE_COUNT);
+    log(`   Test mode: using the ${list.length} most recent.`);
+  }
+
+  // First, the votes already saved on earlier runs.
+  const results = [];
+  const toDownload = [];
+  for (const v of list) {
+    const c = v.congress, s = v.sessionNumber, r = v.rollCallNumber;
+    if (s == null || r == null) continue;
+    const saved = await readJson(path.join(CACHE, 'votes', `${c}-${s}-${r}.json`));
+    if (saved) results.push(saved); else toDownload.push(v);
+  }
+  log(`   ${results.length} already saved from earlier runs; ${toDownload.length} to download.`);
+
+  // Then download the rest, a few at a time.
+  let downloaded = 0;
+  await eachAtOnce(toDownload, async v => {
+    const c = v.congress, s = v.sessionNumber, r = v.rollCallNumber;
+    const json = await api(`/house-vote/${c}/${s}/${r}/members`);
+    if (!json) return;
+    const body = json.houseRollCallVoteMemberVotes
+      ?? Object.values(json).find(x => x && Array.isArray(x.results));
+    if (!body) shapeProblem(`/house-vote/${c}/${s}/${r}/members`, json);
+
+    const casts = {};
+    // Note: in vote data the ID is spelled "bioguideID" (capital D).
+    for (const p of toArray(body.results)) {
+      const id = p.bioguideID ?? p.bioguideId;
+      if (id) casts[id] = p.voteCast;
+    }
+    const type = normType(body.legislationType ?? v.legislationType);
+    const number = body.legislationNumber ?? v.legislationNumber;
+    const vote = {
+      key: `${c}-${s}-${r}`,
+      date: (body.startDate ?? v.startDate ?? '').slice(0, 10),
+      question: body.voteQuestion ?? v.voteQuestion ?? body.voteType ?? v.voteType ?? '',
+      bill: type && number ? `${c}-${type}-${number}` : null,
+      casts,
+    };
+    await writeJson(path.join(CACHE, 'votes', `${vote.key}.json`), vote);
+    results.push(vote);
+    if (++downloaded % 50 === 0) log(`   ...downloaded ${downloaded} of ${toDownload.length} (${minutesSoFar()} min)`);
+  });
+  log(`   Downloaded ${downloaded} new votes.` +
+      (downloaded < toDownload.length ? ` ${toDownload.length - downloaded} left for the next run.` : ''));
+
+  // Votes not tied to a bill (quorum calls, electing the Speaker) are left out.
+  return results.filter(v => v.bill);
+}
+
+// ---------- Step 3: bill titles and subjects --------------------------------
+// bills.json doubles as its own memory: bills already in it aren't looked up again.
+
+async function getBillTitles(votes) {
+  log('Step 3: Looking up titles and subjects of bills voted on...');
+  const file = path.join(OUT, 'bills.json');
+  const bills = (await readJson(file)) || {};
+  const needed = [...new Set(votes.map(v => v.bill))].filter(id => !bills[id]);
+  log(`   ${needed.length} bills to look up.`);
+
+  let done = 0;
+  await eachAtOnce(needed, async id => {
+    const [congress, type, number] = id.split('-');
+    const json = await api(`/bill/${congress}/${type}/${number}`);
+    const b = json?.bill || {};
+    bills[id] = [b.title || null, b.policyArea?.name || null];
+    if (++done % 50 === 0) log(`   ...${done} of ${needed.length} (${minutesSoFar()} min)`);
+  });
+  if (done < needed.length) log(`   ${needed.length - done} bills left for the next run.`);
+  await writeJson(file, bills);
+  return bills;
+}
+
+// ---------- Step 4: contact details and sponsored bills ---------------------
 
 async function getMemberDetails(id) {
   const json = await api(`/member/${id}`);
@@ -241,91 +374,6 @@ async function getSponsored(id) {
       b.policyArea?.name || null,
       (b.introducedDate || '').slice(0, 10) || null,
     ]);
-}
-
-// ---------- Step 3: House votes (cached) ------------------------------------
-
-async function getVotes() {
-  log('Step 3: Getting House votes...');
-  const latest = currentCongress() + 1; // also catches a new Congress starting
-  let list = [];
-  for (let c = FIRST_CONGRESS_WITH_VOTES; c <= latest; c++) {
-    const votes = await apiAll(`/house-vote/${c}`, 'houseRollCallVotes');
-    for (const v of votes) list.push({ ...v, congress: v.congress ?? c });
-  }
-  log(`   Found ${list.length} House votes since 2023.`);
-
-  if (TEST) {
-    // Newest first, then keep just a handful.
-    list.sort((a, b) =>
-      (b.congress - a.congress) ||
-      ((b.sessionNumber ?? 0) - (a.sessionNumber ?? 0)) ||
-      ((b.rollCallNumber ?? 0) - (a.rollCallNumber ?? 0)));
-    list = list.slice(0, TEST_VOTE_COUNT);
-    log(`   Test mode: using the ${list.length} most recent.`);
-  }
-
-  const results = [];
-  let downloaded = 0;
-  for (const v of list) {
-    const c = v.congress, s = v.sessionNumber, r = v.rollCallNumber;
-    if (s == null || r == null) continue;
-    const file = path.join(CACHE, 'votes', `${c}-${s}-${r}.json`);
-
-    let vote = await readJson(file);
-    if (!vote) {
-      const json = await api(`/house-vote/${c}/${s}/${r}/members`);
-      if (!json) continue;
-      const body = json.houseRollCallVoteMemberVotes
-        ?? Object.values(json).find(x => x && Array.isArray(x.results));
-      if (!body) shapeProblem(`/house-vote/${c}/${s}/${r}/members`, json);
-
-      const casts = {};
-      // Note: in vote data the ID is spelled "bioguideID" (capital D).
-      for (const p of toArray(body.results)) {
-        const id = p.bioguideID ?? p.bioguideId;
-        if (id) casts[id] = p.voteCast;
-      }
-      const type = normType(body.legislationType ?? v.legislationType);
-      const number = body.legislationNumber ?? v.legislationNumber;
-      vote = {
-        key: `${c}-${s}-${r}`,
-        date: (body.startDate ?? v.startDate ?? '').slice(0, 10),
-        question: body.voteQuestion ?? v.voteQuestion ?? body.voteType ?? v.voteType ?? '',
-        bill: type && number ? `${c}-${type}-${number}` : null,
-        casts,
-      };
-      await writeJson(file, vote);
-      downloaded++;
-      if (downloaded % 50 === 0) log(`   ...downloaded ${downloaded} new votes so far`);
-    }
-    results.push(vote);
-  }
-  log(`   ${downloaded} new votes downloaded; ${results.length - downloaded} already saved from earlier runs.`);
-  // Votes not tied to a bill (quorum calls, electing the Speaker) are left out.
-  return results.filter(v => v.bill);
-}
-
-// ---------- Step 4: bill titles and subjects --------------------------------
-// bills.json doubles as its own memory: bills already in it aren't looked up again.
-
-async function getBillTitles(votes) {
-  log('Step 4: Looking up titles and subjects of bills voted on...');
-  const file = path.join(OUT, 'bills.json');
-  const bills = (await readJson(file)) || {};
-  const needed = [...new Set(votes.map(v => v.bill))].filter(id => !bills[id]?.[0]);
-  log(`   ${needed.length} bills to look up.`);
-
-  let done = 0;
-  for (const id of needed) {
-    const [congress, type, number] = id.split('-');
-    const json = await api(`/bill/${congress}/${type}/${number}`);
-    const b = json?.bill || {};
-    bills[id] = [b.title || null, b.policyArea?.name || null];
-    if (++done % 50 === 0) log(`   ...${done} of ${needed.length}`);
-  }
-  await writeJson(file, bills);
-  return bills;
 }
 
 // ---------- Putting the pieces together -------------------------------------
@@ -384,8 +432,9 @@ async function main() {
     console.error('  read -s -p "Paste your Congress.gov key, then press Enter: " CONGRESS_API_KEY; echo; export CONGRESS_API_KEY');
     process.exit(1);
   }
-  const started = Date.now();
-  log(TEST ? `TEST MODE — member ${ONLY_MEMBER}, saving to data-test/\n` : 'FULL RUN — saving to data/\n');
+  log(TEST
+    ? `TEST MODE — member ${ONLY_MEMBER}, saving to data-test/\n`
+    : `NIGHTLY RUN — saving to data/, time budget ${BUDGET_MINUTES} minutes\n`);
 
   const members = await getHouseMembers();
   const votes = await getVotes();
@@ -396,33 +445,47 @@ async function main() {
   for (const v of votes) votesShared[v.key] = [v.date, v.question, v.bill];
   await writeJson(path.join(OUT, 'votes.json'), votesShared);
 
-  log(`Step 5: Building files for ${members.length} member(s)...`);
+  // Each representative's votes, worked out from the saved votes (no downloads).
+  const votesByMember = {};
+  for (const v of votes) {
+    for (const [id, position] of Object.entries(v.casts)) {
+      (votesByMember[id] ??= {})[v.key] = position;
+    }
+  }
+
+  log(`Step 4: Contact details and sponsored bills...`);
+  // Read what's already saved, and decide who gets refreshed tonight:
+  // anyone never fully downloaded, plus tonight's seventh of the House.
+  const saved = {};
+  for (const m of members) saved[m.bioguideId] = await readJson(path.join(OUT, 'members', `${m.bioguideId}.json`));
+  const isDue = m => {
+    const s = saved[m.bioguideId];
+    return !s || !s.complete || TEST || REFRESH_ALL || weekdaySlot(m.bioguideId) === todaySlot();
+  };
+  // Never-downloaded representatives go first.
+  const due = members.filter(isDue).sort((a, b) => Number(!!saved[a.bioguideId]?.complete) - Number(!!saved[b.bioguideId]?.complete));
+  log(`   ${due.length} representative(s) to refresh tonight.`);
+
+  const fresh = {};
+  let refreshed = 0;
+  await eachAtOnce(due, async m => {
+    const id = m.bioguideId;
+    const details = await getMemberDetails(id);
+    const sponsored = await getSponsored(id);
+    fresh[id] = { ...details, sponsored };
+    if (++refreshed % 25 === 0) log(`   ...${refreshed} of ${due.length} (${minutesSoFar()} min)`);
+  });
+  if (refreshed < due.length) log(`   ${due.length - refreshed} representative(s) left for the next run.`);
+
+  // Write every representative's file: fresh details where we have them,
+  // otherwise what was saved before (or blanks, marked incomplete).
+  log('Step 5: Saving files...');
   const index = {};
   const keep = new Set();
-  let done = 0, changed = 0, last = null;
-  let refreshed = 0;
+  let changed = 0, last = null;
   for (const m of members) {
     const id = m.bioguideId;
-
-    // Contact details and sponsored bills change slowly and are the slowest
-    // part to download, so each representative is refreshed once a week
-    // (one seventh of them each night). New members, test runs and
-    // --refresh-all always get everything fresh. Votes are updated every night.
-    const saved = await readJson(path.join(OUT, 'members', `${id}.json`));
-    const refresh = !saved || TEST || REFRESH_ALL || weekdaySlot(id) === todaySlot();
-    let details, sponsored;
-    if (refresh) {
-      details = await getMemberDetails(id);
-      sponsored = await getSponsored(id);
-      refreshed++;
-    } else {
-      details = { website: saved.website, phone: saved.phone, office: saved.office };
-      sponsored = saved.sponsored || [];
-    }
-
-    const myVotes = {};
-    for (const v of votes) if (v.casts[id] != null) myVotes[v.key] = v.casts[id];
-
+    const f = fresh[id], s = saved[id];
     last = {
       bioguideId: id,
       name: m.name,
@@ -430,9 +493,12 @@ async function main() {
       state: m.state || null,
       district: m.district ?? null,
       photo: m.depiction?.imageUrl || null,
-      ...details,
-      sponsored,
-      votes: myVotes,
+      website: f ? f.website : s?.website ?? null,
+      phone: f ? f.phone : s?.phone ?? null,
+      office: f ? f.office : s?.office ?? null,
+      sponsored: f ? f.sponsored : s?.sponsored ?? [],
+      complete: Boolean(f || s?.complete),
+      votes: votesByMember[id] || {},
     };
     if (await writeJson(path.join(OUT, 'members', `${id}.json`), last)) changed++;
     keep.add(`${id}.json`);
@@ -443,10 +509,9 @@ async function main() {
     } else {
       log(`   Note: unknown state "${m.state}" for ${m.name}; left out of the index.`);
     }
-    if (++done % 25 === 0) log(`   ...${done} of ${members.length} done`);
   }
 
-  // Remove files for people no longer in the House (full runs only).
+  // Remove files for people no longer in the House (nightly runs only).
   if (!TEST) {
     const dir = path.join(OUT, 'members');
     for (const f of await readdir(dir)) {
@@ -456,9 +521,10 @@ async function main() {
 
   await writeJson(path.join(OUT, 'index.json'), { updated: new Date().toISOString(), states: index });
 
-  const minutes = ((Date.now() - started) / 60000).toFixed(1);
-  log(`\nFinished in ${minutes} minutes, using ${requestCount} requests.`);
-  log(`${refreshed} representative(s) fully refreshed tonight; ${changed} file(s) changed.`);
+  log(`\nFinished in ${minutesSoFar()} minutes, using ${requestCount} requests.`);
+  log(`${refreshed} representative(s) refreshed; ${changed} file(s) changed.`);
+  if (stoppedEarly) log('Time budget reached: everything so far is saved, and the next run will continue from here.');
+  else log('All caught up.');
 
   if (TEST && last) {
     const rows = assembleRows(last, votesShared, bills);

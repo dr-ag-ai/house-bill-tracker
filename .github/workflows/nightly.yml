@@ -45,6 +45,7 @@ jobs:
           CONGRESS_API_KEY: ${{ secrets.CONGRESS_API_KEY }}
 
       - name: Save any changes
+        if: always()       # save whatever was collected, even if the step above stopped early
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
