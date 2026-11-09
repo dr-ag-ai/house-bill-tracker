@@ -78,7 +78,15 @@ h2 { font-size: 1.375rem; font-weight: 800; line-height: 1.25; margin: 0 0 1rem;
 
 /* ---------- The question (the one bold element) ---------- */
 
-.ask { padding: 56px 0 40px; }
+.ask { padding: 40px 0 40px; }
+
+.lead {
+  margin: 0 0 20px;
+  max-width: 36em;
+  font-size: 1.1875rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
 
 .ask-question {
   margin: 0;
@@ -306,7 +314,8 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
 
 @media (max-width: 700px) {
   main, .site-header, .site-footer { padding-left: 16px; padding-right: 16px; }
-  .ask { padding: 32px 0 28px; }
+  .ask { padding: 24px 0 28px; }
+  .lead { font-size: 1.0625rem; margin-bottom: 16px; }
   .blank { width: 100%; }
   .member-card { padding: 16px; gap: 16px; }
   .rep-photo { width: 96px; }
