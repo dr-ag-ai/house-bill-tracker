@@ -7,6 +7,12 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-06-01",
 
+  // The free address house-bill-tracker.<name>.workers.dev stays on (we use it
+  // for testing until the site moves to your domain). Extra "preview" addresses
+  // for each version aren't needed, so they're off.
+  "workers_dev": true,
+  "preview_urls": false,
+
   // Before testing or publishing, copy the latest data into public/data/.
   "build": {
     "command": "node scripts/copy-data.mjs"
