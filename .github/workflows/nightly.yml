@@ -13,6 +13,11 @@ on:
   schedule:
     - cron: '17 9 * * *'   # every day at 9:17 UTC (about 4:17 am US Eastern)
   workflow_dispatch:       # adds the "Run workflow" button
+    inputs:
+      refresh_all:
+        description: 'Refresh every representative now (slow; use after a new Congress starts)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write          # lets the job save the new data into the project
@@ -24,7 +29,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Download the project
         uses: actions/checkout@v5
@@ -35,7 +40,7 @@ jobs:
           node-version: 22
 
       - name: Get the latest data from Congress.gov
-        run: node scripts/nightly.mjs
+        run: node scripts/nightly.mjs ${{ inputs.refresh_all && '--refresh-all' || '' }}
         env:
           CONGRESS_API_KEY: ${{ secrets.CONGRESS_API_KEY }}
 

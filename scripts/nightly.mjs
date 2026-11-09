@@ -23,8 +23,11 @@
 //       node scripts/nightly.mjs --test
 //   Test a different representative:
 //       node scripts/nightly.mjs --test --member=V000081
-//   Full run (everyone, saves into data/):
+//   Nightly run (saves into data/):
 //       node scripts/nightly.mjs
+//   Refresh every representative's details and sponsored bills at once
+//   (normally a seventh of them are refreshed each night):
+//       node scripts/nightly.mjs --refresh-all
 //
 // It needs your Congress.gov key in an environment variable named
 // CONGRESS_API_KEY. It never prints or saves the key.
@@ -43,6 +46,11 @@ const TEST = args.includes('--test');
 const memberArg = args.find(a => a.startsWith('--member='));
 const ONLY_MEMBER = memberArg ? memberArg.split('=')[1] : (TEST ? 'N000002' : null);
 const TEST_VOTE_COUNT = 15;
+const REFRESH_ALL = args.includes('--refresh-all');
+
+// Splits representatives into 7 groups, one refreshed each night.
+const weekdaySlot = id => [...id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % 7;
+const todaySlot = () => Math.floor(Date.now() / 864e5) % 7;
 
 // Test output goes in a separate folder so it never mixes with the real data.
 const OUT = path.resolve(TEST ? 'data-test' : 'data');
@@ -392,10 +400,25 @@ async function main() {
   const index = {};
   const keep = new Set();
   let done = 0, changed = 0, last = null;
+  let refreshed = 0;
   for (const m of members) {
     const id = m.bioguideId;
-    const details = await getMemberDetails(id);
-    const sponsored = await getSponsored(id);
+
+    // Contact details and sponsored bills change slowly and are the slowest
+    // part to download, so each representative is refreshed once a week
+    // (one seventh of them each night). New members, test runs and
+    // --refresh-all always get everything fresh. Votes are updated every night.
+    const saved = await readJson(path.join(OUT, 'members', `${id}.json`));
+    const refresh = !saved || TEST || REFRESH_ALL || weekdaySlot(id) === todaySlot();
+    let details, sponsored;
+    if (refresh) {
+      details = await getMemberDetails(id);
+      sponsored = await getSponsored(id);
+      refreshed++;
+    } else {
+      details = { website: saved.website, phone: saved.phone, office: saved.office };
+      sponsored = saved.sponsored || [];
+    }
 
     const myVotes = {};
     for (const v of votes) if (v.casts[id] != null) myVotes[v.key] = v.casts[id];
@@ -434,7 +457,8 @@ async function main() {
   await writeJson(path.join(OUT, 'index.json'), { updated: new Date().toISOString(), states: index });
 
   const minutes = ((Date.now() - started) / 60000).toFixed(1);
-  log(`\nFinished in ${minutes} minutes, using ${requestCount} requests. ${changed} representative file(s) changed.`);
+  log(`\nFinished in ${minutes} minutes, using ${requestCount} requests.`);
+  log(`${refreshed} representative(s) fully refreshed tonight; ${changed} file(s) changed.`);
 
   if (TEST && last) {
     const rows = assembleRows(last, votesShared, bills);
