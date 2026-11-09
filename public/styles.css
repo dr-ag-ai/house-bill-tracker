@@ -1,0 +1,346 @@
+/* ==========================================================================
+   House Bill Tracker — styles
+   Colors are set once here as named "tokens" and reused everywhere.
+   The only strong colors carry meaning: teal for actions, and one color per
+   kind of vote. Party is never shown in color, to keep the page neutral.
+   ========================================================================== */
+
+:root {
+  --paper:   #F2F4F6;   /* page background: cool off-white */
+  --surface: #FFFFFF;   /* panels */
+  --ink:     #1A2330;   /* main text: dark slate */
+  --muted:   #586474;   /* secondary text */
+  --rule:    #D3DAE2;   /* lines and borders */
+  --accent:  #0B5D5E;   /* buttons, links, the address blank */
+  --accent-ink: #FFFFFF;
+
+  --yea:     #2E7A4B;
+  --nay:     #B13A2C;
+  --present: #8A6714;
+  --absent:  #6A7380;
+
+  --radius: 6px;
+  --font: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:   #12181F;
+    --surface: #1A222B;
+    --ink:     #E6EBF0;
+    --muted:   #A3AEBB;
+    --rule:    #2E3946;
+    --accent:  #5CC2BE;
+    --accent-ink: #0B1F20;
+    --yea:     #6CC28D;
+    --nay:     #F0897A;
+    --present: #E0B860;
+    --absent:  #A3AEBB;
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* "hidden" always wins over layout rules */
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 1rem/1.55 var(--font);
+  font-variant-numeric: tabular-nums;   /* numbers line up in columns */
+}
+
+a { color: var(--accent); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+main, .site-header, .site-footer {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+
+h2 { font-size: 1.375rem; font-weight: 800; line-height: 1.25; margin: 0 0 1rem; }
+
+.fine { color: var(--muted); font-size: .875rem; }
+
+/* ---------- Header ---------- */
+
+.site-header { padding-top: 20px; padding-bottom: 4px; }
+.site-name { color: var(--ink); font-weight: 600; text-decoration: none; }
+
+/* ---------- The question (the one bold element) ---------- */
+
+.ask { padding: 56px 0 40px; }
+
+.ask-question {
+  margin: 0;
+  font-size: clamp(2rem, 5.2vw, 3.75rem);
+  font-weight: 800;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  max-width: 18em;
+}
+
+/* The blank gets its own line, full width, so a whole address fits. */
+.blank { display: block; width: 100%; margin: 6px 0 10px; }
+
+.blank input {
+  width: 100%;
+  font: 600 0.62em/1.3 var(--font);
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  border-bottom: 4px solid var(--accent);
+  border-radius: 0;
+  padding: 0 0 2px;
+}
+.blank input::placeholder { color: var(--muted); opacity: .55; font-weight: 400; }
+.blank input:focus { outline: none; border-bottom-width: 6px; }
+
+.ask-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-top: 28px; }
+.hint { margin: 0; color: var(--muted); font-size: .9375rem; max-width: 34em; }
+
+button {
+  font: 600 1rem var(--font);
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: 0;
+  border-radius: var(--radius);
+  padding: 12px 22px;
+  cursor: pointer;
+}
+button:disabled { opacity: .6; cursor: progress; }
+
+.status { min-height: 1.5em; margin: 20px 0 0; font-weight: 500; }
+.status.error { color: var(--nay); }
+
+/* ---------- Representative and map ---------- */
+
+#results > section { margin-bottom: 48px; }
+
+.member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 24px;
+  align-items: stretch;
+}
+
+.member-card {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+.rep-photo {
+  width: 132px;
+  height: auto;
+  aspect-ratio: 160 / 196;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--rule);
+  flex: none;
+}
+
+.rep-role { margin: 0 0 4px; color: var(--muted); }
+.rep-name { font-size: 2rem; line-height: 1.15; margin: 0 0 6px; }
+.rep-party { margin: 0 0 16px; }
+.rep-address { margin: 0; color: var(--muted); font-size: .875rem; }
+
+.map-wrap { margin: 0; display: flex; flex-direction: column; }
+.map {
+  flex: 1;
+  min-height: 300px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.map-caption { color: var(--muted); font-size: .875rem; margin-top: 8px; }
+
+/* ---------- Contact ---------- */
+
+.contact-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px 32px;
+  margin: 0 0 12px;
+}
+.contact-list dt { color: var(--muted); font-size: .875rem; }
+.contact-list dd { margin: 2px 0 0; font-weight: 500; overflow-wrap: anywhere; }
+
+/* ---------- Bills ---------- */
+
+.bills-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 24px; }
+.count { margin: 0 0 1rem; color: var(--muted); }
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+.filters label { display: flex; flex-direction: column; gap: 4px; font-size: .875rem; color: var(--muted); }
+.filters .search { flex: 1 1 220px; }
+.filters .check { flex-direction: row; align-items: center; gap: 8px; color: var(--ink); padding-bottom: 8px; }
+
+select, input[type="search"] {
+  font: 400 1rem var(--font);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+
+.bill-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+.bill-table th {
+  text-align: left;
+  font-size: .875rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.bill-table td { padding: 14px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.bill-table tbody tr:last-child td { border-bottom: 0; }
+
+.bill-label { font-weight: 600; white-space: nowrap; }
+.bill-title { margin: 2px 0 0; max-width: 40em; }
+.bill-title.untitled { color: var(--muted); font-style: italic; }
+
+.date-line { display: block; white-space: nowrap; }
+.date-line span { color: var(--muted); }
+
+.subject { color: var(--muted); font-size: .9375rem; }
+
+.read a { display: block; white-space: nowrap; }
+
+/* A vote is shown as a word with a colored mark in front, never color alone. */
+.vote { font-weight: 600; white-space: nowrap; }
+.vote::before {
+  content: "";
+  display: inline-block;
+  width: 10px; height: 10px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.vote.yea { color: var(--yea); }
+.vote.nay { color: var(--nay); }
+.vote.present { color: var(--present); }
+.vote.absent { color: var(--absent); }
+.vote.absent::before { background: transparent; border: 2px solid currentColor; }
+
+.no-vote { color: var(--muted); }
+
+.all-votes-btn {
+  display: block;
+  margin-top: 6px;
+  padding: 0;
+  font-size: .875rem;
+  font-weight: 500;
+  color: var(--accent);
+  background: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.vote-list-row td { background: var(--paper); padding-top: 4px; }
+.vote-list { margin: 0; padding: 0; list-style: none; }
+.vote-list li {
+  display: grid;
+  grid-template-columns: 6em minmax(0, 1fr) 9em;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.vote-list li:last-child { border-bottom: 0; }
+.vote-list .when { color: var(--muted); }
+
+.empty { color: var(--muted); padding: 16px 0; }
+.more {
+  display: block;
+  margin: 16px auto 0;
+  color: var(--accent);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+}
+
+/* ---------- About ---------- */
+
+.about ul { padding-left: 1.2em; max-width: 46em; }
+.about li { margin-bottom: 8px; }
+
+/* ---------- Footer ---------- */
+
+.site-footer { padding-top: 24px; padding-bottom: 40px; color: var(--muted); font-size: .875rem; border-top: 1px solid var(--rule); }
+
+/* ---------- Tablets and phones ---------- */
+
+@media (max-width: 860px) {
+  .member { grid-template-columns: 1fr; }
+  .contact-list { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 700px) {
+  main, .site-header, .site-footer { padding-left: 16px; padding-right: 16px; }
+  .ask { padding: 32px 0 28px; }
+  .blank { width: 100%; }
+  .member-card { padding: 16px; gap: 16px; }
+  .rep-photo { width: 96px; }
+  .rep-name { font-size: 1.5rem; }
+  .filters label:not(.check) { flex: 1 1 140px; }
+
+  /* The table becomes one card per bill. */
+  .bill-table, .bill-table tbody, .bill-table tr, .bill-table td { display: block; width: 100%; }
+  .bill-table { border: 0; background: none; }
+  .bill-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .bill-table tbody tr.bill-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    padding: 8px 0;
+  }
+  .bill-table td { border: 0; padding: 6px 16px; }
+  .bill-table td.cell-bill, .bill-table td.read { grid-column: 1 / -1; }
+  .bill-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: .8125rem;
+    color: var(--muted);
+  }
+  .bill-table td.cell-bill::before { display: none; }
+  .read a { display: inline; margin-right: 16px; }
+  .vote-list-row { margin: -12px 0 12px; }
+  .vote-list-row td { border: 1px solid var(--rule); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); }
+  .vote-list li { grid-template-columns: 1fr; gap: 2px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}

@@ -3,48 +3,149 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>House Bill Tracker — test page</title>
-  <style>
-    body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
-    input { width: 100%; padding: .6rem; font-size: 1rem; box-sizing: border-box; }
-    button { margin-top: .6rem; padding: .6rem 1.2rem; font-size: 1rem; }
-    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; white-space: pre-wrap; }
-    .note { color: #666; font-size: .9rem; }
-  </style>
+  <title>Who Represents Me? Bills and votes of your U.S. House member</title>
+  <meta name="description" content="Enter your address to see your U.S. House representative, the bills they sponsored, and how they voted.">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,800;1,400&display=swap" rel="stylesheet">
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+  <link href="styles.css" rel="stylesheet">
 </head>
 <body>
-  <h1>House Bill Tracker</h1>
-  <p class="note">Temporary test page for Phase 4. The real page is built in Phase 5.</p>
+  <header class="site-header">
+    <a class="site-name" href="/">House Bill Tracker</a>
+  </header>
 
-  <form id="f">
-    <label for="a">Enter a US street address</label>
-    <input id="a" value="350 Fifth Avenue, New York, NY 10118" autocomplete="street-address">
-    <button>Look up</button>
-  </form>
+  <main>
+    <!-- The question is the form: the address box is the blank in the sentence. -->
+    <section class="ask">
+      <form id="lookup" class="ask-form" autocomplete="on">
+        <h1 class="ask-question">
+          <span>Who represents</span>
+          <label class="blank">
+            <span class="visually-hidden">Your street address</span>
+            <input id="address" name="address" type="text" required minlength="5" maxlength="200"
+                   placeholder="your street address" autocomplete="street-address">
+          </label>
+          <span>in the U.S.&nbsp;House?</span>
+        </h1>
+        <div class="ask-actions">
+          <button type="submit" id="go">Find my representative</button>
+          <p class="hint">Include the city and state or ZIP code. Your address is only used for this lookup and isn't saved.</p>
+        </div>
+      </form>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
 
-  <h2>Back end answer</h2>
-  <pre id="out">(nothing yet)</pre>
+    <div id="results" hidden>
+      <!-- The representative and their district -->
+      <section class="member" aria-labelledby="rep-name">
+        <div class="member-card">
+          <img id="rep-photo" class="rep-photo" alt="" width="160" height="196">
+          <div class="rep-text">
+            <p id="rep-role" class="rep-role"></p>
+            <h2 id="rep-name" class="rep-name"></h2>
+            <p id="rep-party" class="rep-party"></p>
+            <p id="rep-address" class="rep-address"></p>
+          </div>
+        </div>
+        <figure class="map-wrap">
+          <div id="map" class="map" role="img" aria-label="Map of the congressional district"></div>
+          <figcaption id="map-caption" class="map-caption"></figcaption>
+        </figure>
+      </section>
 
-  <h2>Representative file (first part)</h2>
-  <pre id="rep">(nothing yet)</pre>
+      <!-- How to reach them -->
+      <section class="contact" aria-labelledby="contact-h">
+        <h2 id="contact-h">Contact</h2>
+        <dl class="contact-list">
+          <div><dt>Phone</dt><dd id="c-phone"></dd></div>
+          <div><dt>Washington office</dt><dd id="c-office"></dd></div>
+          <div><dt>Website and contact form</dt><dd id="c-web"></dd></div>
+        </dl>
+        <p class="fine">Members of the House don't publish email addresses. To write to them, use the contact form on their official website.</p>
+      </section>
 
-  <script>
-    document.getElementById('f').addEventListener('submit', async e => {
-      e.preventDefault();
-      const out = document.getElementById('out'), rep = document.getElementById('rep');
-      out.textContent = 'Looking up...'; rep.textContent = '';
-      const res = await fetch('/api/lookup?address=' + encodeURIComponent(document.getElementById('a').value));
-      const json = await res.json();
-      out.textContent = 'Status ' + res.status + '\n' + JSON.stringify(json, null, 2);
-      if (json.representative) {
-        const m = await (await fetch('/data/members/' + json.representative.bioguideId + '.json')).json();
-        rep.textContent = JSON.stringify({
-          name: m.name, party: m.party, state: m.state, district: m.district,
-          photo: m.photo, phone: m.phone, website: m.website, office: m.office,
-          sponsoredBills: m.sponsored.length, votesCast: Object.keys(m.votes).length,
-        }, null, 2);
-      }
-    });
-  </script>
+      <!-- Bills sponsored and voted on -->
+      <section class="bills" aria-labelledby="bills-h">
+        <div class="bills-head">
+          <h2 id="bills-h">Bills sponsored and voted on</h2>
+          <p id="count" class="count" aria-live="polite"></p>
+        </div>
+
+        <form id="filters" class="filters" onsubmit="return false">
+          <label>Period
+            <select id="f-period">
+              <option value="2023" selected>Since 2023</option>
+              <option value="all">All years</option>
+            </select>
+          </label>
+          <label>Show
+            <select id="f-role">
+              <option value="any" selected>Sponsored or voted on</option>
+              <option value="sponsored">Sponsored</option>
+              <option value="voted">Voted on</option>
+            </select>
+          </label>
+          <label>Subject
+            <select id="f-subject"><option value="" selected>All subjects</option></select>
+          </label>
+          <label>Order
+            <select id="f-order">
+              <option value="new" selected>Newest first</option>
+              <option value="old">Oldest first</option>
+            </select>
+          </label>
+          <label class="search">Search titles
+            <input id="f-search" type="search" placeholder="e.g. veterans, water, H.R. 9497">
+          </label>
+          <label class="check">
+            <input id="f-rules" type="checkbox">
+            Show procedural votes
+          </label>
+        </form>
+
+        <table class="bill-table">
+          <thead>
+            <tr>
+              <th scope="col">Bill</th>
+              <th scope="col">Role</th>
+              <th scope="col">Vote</th>
+              <th scope="col">Date</th>
+              <th scope="col">Subject</th>
+              <th scope="col">Read</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="empty" class="empty" hidden>No bills match these filters. Try “All years” or clear the search.</p>
+        <button id="more" class="more" type="button" hidden>Show 50 more</button>
+      </section>
+
+      <!-- What the data covers and its limits -->
+      <section class="about" aria-labelledby="about-h">
+        <h2 id="about-h">About this data</h2>
+        <ul>
+          <li>Voting records start in 2023 (the 118th Congress). Congress.gov doesn't publish earlier House votes in a form this site can use.</li>
+          <li>Votes are updated every night. Each representative's sponsored bills and contact details are refreshed once a week, so a brand-new bill can take up to a week to appear.</li>
+          <li>The Vote column shows one vote for each bill. If the House voted on the bill once, the button below it reads “See the vote.” If the House voted on it more than once (for example, on amendments or procedural motions as well as the bill itself), the button reads “See all” and the number of votes, and opens the full list, newest first.</li>
+          <li>When a bill had several votes, the Vote column shows the most recent vote to pass or approve it. If there was no such vote, it shows the most recent vote of any kind.</li>
+          <li>Procedural votes on “rules” (resolutions that set the terms of debate for other bills) are hidden unless you choose to show them.</li>
+          <li>“Not Voting” means the representative didn't cast a vote. “Present” means they were there but chose not to vote yes or no. Some votes are recorded as “Aye” and “No” instead of “Yea” and “Nay”; they mean the same thing.</li>
+          <li>Sponsored bills include the representative's whole career when you choose “All years.”</li>
+          <li>Districts come from the U.S. Census Bureau's current maps. After districts are redrawn, an address can briefly show a new district before its representative takes office.</li>
+        </ul>
+        <p class="fine">Data from <a href="https://www.congress.gov/">Congress.gov</a> and the <a href="https://www.census.gov/">U.S. Census Bureau</a>. This is an independent site, not an official government website. <span id="updated"></span></p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <p>Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/">OpenFreeMap</a>.</p>
+  </footer>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

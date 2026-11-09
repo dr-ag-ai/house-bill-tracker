@@ -6,7 +6,11 @@
 //
 //     /api/lookup?address=350 Fifth Avenue, New York, NY 10118
 //
-// It does three things:
+// It also answers /api/district?geoid=3612&layer=120th Congressional Districts
+// with the district's outline (from the Census Bureau's TIGERweb map
+// service), for the map on the page.
+//
+// The lookup does three things:
 //   1. Asks the US Census geocoder which congressional district the address
 //      is in.
 //   2. Looks up that district in data/index.json (made by the nightly job).
@@ -19,12 +23,78 @@
 const CENSUS = 'https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress';
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === '/api/lookup') return lookup(url, request, env);
+    if (url.pathname === '/api/district') return district(url, ctx);
     return reply(404, { error: 'not_found', message: 'Nothing here.' });
   },
 };
+
+// ---------------------------------------------------------------------------
+// District outline for the map. Outlines are public and rarely change, so
+// answers are kept by Cloudflare for a week to save repeat trips to the Census.
+// ---------------------------------------------------------------------------
+
+const TIGERWEB = 'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_Current/MapServer';
+
+async function district(url, ctx) {
+  const geoid = url.searchParams.get('geoid') || '';
+  const layerName = url.searchParams.get('layer') || '';
+  if (!/^\d{4}$/.test(geoid) || !/^\d{2,3}(st|nd|rd|th) Congressional Districts$/i.test(layerName)) {
+    return reply(400, { error: 'bad_request', message: 'Unknown district.' });
+  }
+
+  const cache = caches.default;
+  const cacheKey = new Request(url.toString());
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+
+  try {
+    // Find the map layer with the same name the address lookup used
+    // (its number changes when the Census adds a new Congress's districts).
+    const info = await (await fetch(`${TIGERWEB}?f=json`, { signal: AbortSignal.timeout(20_000) })).json();
+    const layer = (info.layers || []).find(l => l.name?.toLowerCase() === layerName.toLowerCase());
+    if (!layer) throw new Error('layer not found');
+
+    const q = new URL(`${TIGERWEB}/${layer.id}/query`);
+    q.searchParams.set('where', `GEOID='${geoid}'`);
+    q.searchParams.set('outFields', 'GEOID,NAME');
+    q.searchParams.set('returnGeometry', 'true');
+    q.searchParams.set('outSR', '4326');
+    q.searchParams.set('maxAllowableOffset', '0.0005'); // simplify the outline a little; plenty for a small map
+    q.searchParams.set('geometryPrecision', '5');
+    q.searchParams.set('f', 'json');
+    const json = await (await fetch(q, { signal: AbortSignal.timeout(20_000) })).json();
+    const rings = json.features?.[0]?.geometry?.rings;
+    if (!rings?.length) throw new Error('no outline');
+
+    const res = new Response(JSON.stringify({ type: 'Feature', properties: { geoid }, geometry: ringsToGeoJSON(rings) }), {
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=604800' },
+    });
+    ctx.waitUntil(cache.put(cacheKey, res.clone()));
+    return res;
+  } catch {
+    return reply(502, { error: 'outline_unavailable', message: 'The district outline could not be loaded.' });
+  }
+}
+
+// The Census sends outlines as "rings" (lists of points). Outer edges run
+// clockwise and holes run counter-clockwise; maps need them grouped into
+// polygons (GeoJSON), so each hole is attached to the outer edge before it.
+function ringsToGeoJSON(rings) {
+  const clockwise = ring => {
+    let sum = 0;
+    for (let i = 0; i < ring.length - 1; i++) sum += (ring[i + 1][0] - ring[i][0]) * (ring[i + 1][1] + ring[i][1]);
+    return sum > 0;
+  };
+  const polygons = [];
+  for (const ring of rings) {
+    if (clockwise(ring) || !polygons.length) polygons.push([ring]);
+    else polygons.at(-1).push(ring);
+  }
+  return { type: 'MultiPolygon', coordinates: polygons };
+}
 
 // Sends a JSON answer. "no-store" tells browsers and Cloudflare never to keep
 // a copy, because the answer is tied to someone's address.
