@@ -21,6 +21,7 @@
 // ============================================================================
 
 const CENSUS = 'https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress';
+const CENSUS_POINT = 'https://geocoding.geo.census.gov/geocoder/geographies/coordinates';
 
 export default {
   async fetch(request, env, ctx) {
@@ -105,21 +106,40 @@ function reply(status, body) {
   });
 }
 
+// Two ways to ask:
+//   /api/lookup?address=350 Fifth Avenue, New York, NY 10118
+//   /api/lookup?lat=40.748&lon=-73.985   (a spot picked on the map, or the
+//                                         visitor's current location)
+// The second helps where the Census address list is missing newer
+// addresses, such as rural 911 addresses.
 async function lookup(url, request, env) {
   const address = (url.searchParams.get('address') || '').trim();
-  if (address.length < 5) {
-    return reply(400, { error: 'bad_address', message: 'Please enter a full street address, including city and state or ZIP code.' });
-  }
-  if (/^\d{5}(-\d{4})?$/.test(address)) {
-    return reply(400, { error: 'zip_only', message: "A ZIP code alone isn't enough, because many ZIP codes cross district lines. Please enter a full street address, such as 123 Main St, Springfield, IL 62701." });
-  }
-  if (address.length > 200) {
-    return reply(400, { error: 'bad_address', message: 'That address is too long.' });
+  const latText = url.searchParams.get('lat');
+  const lonText = url.searchParams.get('lon');
+  const byPoint = latText != null && lonText != null;
+
+  const census = new URL(byPoint ? CENSUS_POINT : CENSUS);
+  if (byPoint) {
+    const lat = Number(latText), lon = Number(lonText);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return reply(400, { error: 'bad_location', message: 'That location could not be read. Please pick a spot on the map again.' });
+    }
+    census.searchParams.set('x', lon.toFixed(6));
+    census.searchParams.set('y', lat.toFixed(6));
+  } else {
+    if (address.length < 5) {
+      return reply(400, { error: 'bad_address', message: 'Please enter your full street address, with city, state, and ZIP code.' });
+    }
+    if (/^\d{5}(-\d{4})?$/.test(address)) {
+      return reply(400, { error: 'zip_only', message: "A ZIP code alone isn't enough, because many ZIP codes cross district lines. Please enter a full street address, such as 123 Main St, Springfield, IL 62701." });
+    }
+    if (address.length > 200) {
+      return reply(400, { error: 'bad_address', message: 'That address is too long.' });
+    }
+    census.searchParams.set('address', address);
   }
 
-  // ---- 1. Address -> district (US Census geocoder) ----
-  const census = new URL(CENSUS);
-  census.searchParams.set('address', address);
+  // ---- 1. Address or location -> district (US Census geocoder) ----
   census.searchParams.set('benchmark', 'Public_AR_Current');
   census.searchParams.set('vintage', 'Current_Current');
   census.searchParams.set('layers', 'all');
@@ -134,9 +154,15 @@ async function lookup(url, request, env) {
     return reply(502, { error: 'census_unavailable', message: 'The Census address service is not responding right now. Please try again in a minute.' });
   }
 
-  const match = geo?.result?.addressMatches?.[0];
-  if (!match) {
-    return reply(404, { error: 'address_not_found', message: "We couldn't find that address. Check the spelling, and include the city and state or ZIP code." });
+  // An address search returns a list of matches; a location search returns
+  // the areas at that spot directly.
+  const match = byPoint
+    ? { geographies: geo?.result?.geographies, coordinates: { x: Number(lonText), y: Number(latText) } }
+    : geo?.result?.addressMatches?.[0];
+  if (!match?.geographies) {
+    return reply(404, byPoint
+      ? { error: 'location_not_found', message: "That spot isn't inside a U.S. congressional district. Try picking a spot on land within the United States." }
+      : { error: 'address_not_found', message: "We couldn't find that address. Check the spelling, and include the city, state, and ZIP code. If your address is new or rural, use your location or pick the spot on the map instead." });
   }
 
   // The Census names this layer after the Congress ("120th Congressional
@@ -145,8 +171,10 @@ async function lookup(url, request, env) {
   const layers = match.geographies || {};
   const cdLayer = Object.keys(layers).find(name => /Congressional Districts/i.test(name));
   const cd = cdLayer && layers[cdLayer]?.[0];
-  if (!cd?.GEOID) {
-    return reply(404, { error: 'no_district', message: 'That address was found, but it is not inside a congressional district.' });
+  if (!cd?.GEOID || /ZZ$/.test(cd.GEOID)) {
+    return reply(404, { error: 'no_district', message: byPoint
+      ? "That spot isn't inside a U.S. congressional district. Try picking a spot on land within the United States."
+      : 'That address was found, but it is not inside a congressional district.' });
   }
 
   // GEOID = 2-digit state code + 2-digit district ("3612" = New York, 12th).
@@ -158,6 +186,7 @@ async function lookup(url, request, env) {
 
   const result = {
     matchedAddress: match.matchedAddress || null,
+    byLocation: byPoint,
     coordinates: match.coordinates ? { lon: match.coordinates.x, lat: match.coordinates.y } : null,
     stateCode,
     districtName: cd.NAME || null,

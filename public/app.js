@@ -243,7 +243,8 @@ function showMember(info, member) {
   $('rep-role').textContent = `${title} for ${districtLabel(info, member)}`;
   $('rep-name').textContent = name;
   $('rep-party').textContent = member.party || '';
-  $('rep-address').textContent = info.matchedAddress ? `Matched address: ${info.matchedAddress}` : '';
+  $('rep-address').textContent = info.matchedAddress ? `Matched address: ${info.matchedAddress}`
+    : info.locationLabel ? `Looked up from: ${info.locationLabel.toLowerCase()}` : '';
 
   const photo = $('rep-photo');
   if (member.photo) { photo.src = member.photo; photo.alt = `Official photo of ${name}`; photo.hidden = false; }
@@ -310,11 +311,14 @@ async function showMap(info) {
 
 // ---------- The lookup ------------------------------------------------------
 
-async function lookup(address) {
+// "query" is either { address } or { lat, lon }.
+async function lookup(query) {
   $('go').disabled = true;
   setStatus('Looking up your district…');
   try {
-    const info = await getJson(`/api/lookup?address=${encodeURIComponent(address)}`);
+    const { label, ...params } = query;   // the label is for this page only, not sent anywhere
+    const info = await getJson(`/api/lookup?${new URLSearchParams(params)}`);
+    if (label) info.locationLabel = label;
     if (!info.representative) {
       $('results').hidden = true;
       setStatus(`${info.districtName || 'This district'}: ${info.note || 'no current representative was found.'}`, true);
@@ -356,7 +360,57 @@ async function lookup(address) {
 
 $('lookup').addEventListener('submit', e => {
   e.preventDefault();
-  lookup($('address').value.trim());
+  lookup({ address: $('address').value.trim() });
+});
+
+// ---------- Without an address: current location or a spot on the map -------
+
+$('use-location').addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    setStatus("This browser can't share your location. Pick the spot on a map instead.", true);
+    return;
+  }
+  setStatus('Asking your browser for your location…');
+  navigator.geolocation.getCurrentPosition(
+    pos => lookup({ lat: pos.coords.latitude, lon: pos.coords.longitude, label: 'Your current location' }),
+    () => setStatus("Your location couldn't be read. Check that location access is allowed for this site, or pick the spot on a map instead.", true),
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
+  );
+});
+
+let picker = null, pickerPin = null;
+$('pick-on-map').addEventListener('click', () => {
+  const wrap = $('picker-wrap');
+  const open = wrap.hidden;
+  wrap.hidden = !open;
+  $('pick-on-map').setAttribute('aria-expanded', String(open));
+  if (!open) return;
+  if (!window.maplibregl) {
+    $('picker').replaceChildren(el('p', { class: 'fine', style: 'padding:16px' }, 'The map could not be loaded.'));
+    return;
+  }
+  if (picker) { picker.resize(); return; }
+  picker = new maplibregl.Map({
+    container: 'picker',
+    style: 'https://tiles.openfreemap.org/styles/liberty',
+    center: [-98.5, 39.8],   // the middle of the continental U.S.
+    zoom: 3.3,
+    attributionControl: { compact: true },
+    cooperativeGestures: true,
+  });
+  picker.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+  picker.on('click', e => {
+    const { lng, lat } = e.lngLat.wrap();
+    if (picker.getZoom() < 12) {
+      // Too far out to be sure which side of a district line the spot is on.
+      picker.easeTo({ center: [lng, lat], zoom: Math.min(picker.getZoom() + 4, 14) });
+      setStatus('Zoom in a little more, then click the exact spot.');
+      return;
+    }
+    pickerPin?.remove();
+    pickerPin = new maplibregl.Marker({ color: '#0B5D5E' }).setLngLat([lng, lat]).addTo(picker);
+    lookup({ lat: lat.toFixed(6), lon: lng.toFixed(6), label: 'The spot you picked on the map' });
+  });
 });
 
 for (const id of ['f-period', 'f-role', 'f-subject', 'f-order', 'f-rules']) {

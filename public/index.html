@@ -33,9 +33,21 @@
         </h1>
         <div class="ask-actions">
           <button type="submit" id="go">Find my representative</button>
-          <p class="hint">Include the city and state or ZIP code. Your address is only used for this lookup and isn't saved.</p>
+          <p class="hint">Enter your full street address, with city, state, and ZIP code. Your address or location is only used for this lookup and isn't saved.</p>
         </div>
       </form>
+
+      <!-- For addresses the Census list doesn't have yet (often new or rural 911 addresses) -->
+      <div class="alt">
+        <span class="alt-label">Address not found?</span>
+        <button type="button" id="use-location" class="link-button">Use my location</button>
+        <button type="button" id="pick-on-map" class="link-button" aria-expanded="false" aria-controls="picker-wrap">Pick the spot on a map</button>
+      </div>
+      <div id="picker-wrap" class="picker-wrap" hidden>
+        <p class="fine">Zoom in to where you live and click on the spot. Use the + and − buttons, or scroll while holding Ctrl.</p>
+        <div id="picker" class="picker" role="application" aria-label="Map for choosing your location"></div>
+      </div>
+
       <p id="status" class="status" role="status" aria-live="polite"></p>
     </section>
 
