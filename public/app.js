@@ -22,8 +22,9 @@ let current = null;  // the district currently shown: { code, title }
 
 // ---------- Small helpers ---------------------------------------------------
 
-// "2025-03-14" -> "03/2025"
-const monthYear = d => (d ? `${d.slice(5, 7)}/${d.slice(0, 4)}` : '');
+// "2025-03-14" -> "Mar 2025"
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthYear = d => (d ? `${MONTHS[Number(d.slice(5, 7)) - 1] || ''} ${d.slice(0, 4)}`.trim() : '');
 const number = n => Number(n).toLocaleString('en-US');
 
 // Builds an element: el('a', { href: '...' }, 'text', otherElement)
