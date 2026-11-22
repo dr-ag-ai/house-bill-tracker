@@ -234,6 +234,15 @@ function shapeProblem(apiPath, json) {
   process.exit(1);
 }
 
+// The first year a member served in the House, from their term history.
+function firstHouseYear(m) {
+  const years = toArray(m.terms?.item)
+    .filter(t => t.chamber === 'House of Representatives' && t.startYear)
+    .map(t => Number(t.startYear))
+    .filter(Number.isFinite);
+  return years.length ? Math.min(...years) : null;
+}
+
 // ---------- Step 1: current House members ----------------------------------
 
 async function getHouseMembers() {
@@ -278,6 +287,11 @@ async function getVotes() {
     log(`   Test mode: using the ${list.length} most recent.`);
   }
 
+  // Whether each vote passed or failed comes with the vote list itself, so it
+  // is filled in for every vote, including ones saved before this was added.
+  const resultByKey = {};
+  for (const v of list) resultByKey[`${v.congress}-${v.sessionNumber}-${v.rollCallNumber}`] = v.result ?? null;
+
   // First, the votes already saved on earlier runs.
   const results = [];
   const toDownload = [];
@@ -312,6 +326,7 @@ async function getVotes() {
       date: (body.startDate ?? v.startDate ?? '').slice(0, 10),
       question: body.voteQuestion ?? v.voteQuestion ?? body.voteType ?? v.voteType ?? '',
       bill: type && number ? `${c}-${type}-${number}` : null,
+      result: body.result ?? v.result ?? null,
       casts,
     };
     await writeJson(path.join(CACHE, 'votes', `${vote.key}.json`), vote);
@@ -320,6 +335,15 @@ async function getVotes() {
   });
   log(`   Downloaded ${downloaded} new votes.` +
       (downloaded < toDownload.length ? ` ${toDownload.length - downloaded} left for the next run.` : ''));
+
+  for (const v of results) v.result = resultByKey[v.key] ?? v.result ?? null;
+
+  // A fixed order (oldest first), so files only change when the data does.
+  const order = k => k.split('-').map(Number);
+  results.sort((a, b) => {
+    const [ac, as, ar] = order(a.key), [bc, bs, br] = order(b.key);
+    return ac - bc || as - bs || ar - br;
+  });
 
   // Votes not tied to a bill (quorum calls, electing the Speaker) are left out.
   return results.filter(v => v.bill);
@@ -440,9 +464,10 @@ async function main() {
   const votes = await getVotes();
   const bills = await getBillTitles(votes);
 
-  // votes.json: { "119-1-5": [date, question, bill ID], ... }
+  // votes.json: { "119-1-5": [date, question, bill ID, result], ... }
+  // result is what the House decided, e.g. "Passed" or "Failed".
   const votesShared = {};
-  for (const v of votes) votesShared[v.key] = [v.date, v.question, v.bill];
+  for (const v of votes) votesShared[v.key] = [v.date, v.question, v.bill, v.result ?? null];
   await writeJson(path.join(OUT, 'votes.json'), votesShared);
 
   // Each representative's votes, worked out from the saved votes (no downloads).
@@ -493,6 +518,8 @@ async function main() {
       state: m.state || null,
       district: m.district ?? null,
       photo: m.depiction?.imageUrl || null,
+      // The first year this person served in the House (for "In the House since").
+      houseSince: firstHouseYear(m),
       website: f ? f.website : s?.website ?? null,
       phone: f ? f.phone : s?.phone ?? null,
       office: f ? f.office : s?.office ?? null,

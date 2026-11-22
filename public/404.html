@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page not found · RepTracker</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+  <link href="/styles.css" rel="stylesheet">
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-name" href="/"><img src="/favicon.svg" alt="" width="22" height="22">RepTracker</a>
+  </header>
+  <main>
+    <section class="ask not-found">
+      <h1 class="nf-title">That page doesn't exist.</h1>
+      <p class="lead">Look up your representative instead. District pages look like <a href="/ny-12">reptracker.us.com/ny-12</a>.</p>
+      <!-- Hands the address to the home page, which runs the lookup. It is kept
+           only in this browser tab (never in the page address), then cleared. -->
+      <form class="nf-form" action="/" method="get" onsubmit="event.preventDefault(); try { sessionStorage.setItem('rt-address', this.address.value.trim()); } catch (e) {} location.href = '/';">
+        <label class="visually-hidden" for="address">Your street address, with city, state, and ZIP code</label>
+        <input id="address" name="address" type="text" placeholder="123 Main St, Springfield, IL 62701" autocomplete="street-address" required>
+        <button type="submit">Find my representative</button>
+      </form>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <p><strong>RepTracker</strong> is an independent site, not an official government website.</p>
+  </footer>
+</body>
+</html>

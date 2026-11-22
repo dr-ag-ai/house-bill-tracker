@@ -2,13 +2,16 @@
 // House Bill Tracker — the back end (a Cloudflare Worker)
 // ----------------------------------------------------------------------------
 // The webpage and the data files are served by Cloudflare directly. This code
-// only runs for one address:
+// runs for everything else:
 //
-//     /api/lookup?address=350 Fifth Avenue, New York, NY 10118
-//
-// It also answers /api/district?geoid=3612&layer=120th Congressional Districts
-// with the district's outline (from the Census Bureau's TIGERweb map
-// service), for the map on the page.
+//     /api/lookup?address=...  or  ?lat=...&lon=...  or  ?code=ny-12
+//         -> the district and its representative
+//     /api/district?geoid=3612
+//         -> the district's outline for the map (Census TIGERweb service)
+//     /ny-12, /wy, /dc ...
+//         -> a shareable page for one district, with a link preview
+//     anything else
+//         -> a friendly "page not found" page
 //
 // The lookup does three things:
 //   1. Asks the US Census geocoder which congressional district the address
@@ -23,14 +26,103 @@
 const CENSUS = 'https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress';
 const CENSUS_POINT = 'https://geocoding.geo.census.gov/geocoder/geographies/coordinates';
 
+// Shareable pages: each district has its own address, like /ny-12, and states
+// or territories with a single seat use just their letters, like /wy or /dc.
+// These links never contain anyone's street address.
+const POSTAL_TO_FIPS = {
+  al:'01', ak:'02', az:'04', ar:'05', ca:'06', co:'08', ct:'09', de:'10', dc:'11', fl:'12',
+  ga:'13', hi:'15', id:'16', il:'17', in:'18', ia:'19', ks:'20', ky:'21', la:'22', me:'23',
+  md:'24', ma:'25', mi:'26', mn:'27', ms:'28', mo:'29', mt:'30', ne:'31', nv:'32', nh:'33',
+  nj:'34', nm:'35', ny:'36', nc:'37', nd:'38', oh:'39', ok:'40', or:'41', pa:'42', ri:'44',
+  sc:'45', sd:'46', tn:'47', tx:'48', ut:'49', vt:'50', va:'51', wa:'53', wv:'54', wi:'55',
+  wy:'56', as:'60', gu:'66', mp:'69', pr:'72', vi:'78',
+};
+const FIPS_TO_POSTAL = Object.fromEntries(Object.entries(POSTAL_TO_FIPS).map(([p, f]) => [f, p]));
+// DC and the territories use "98" for their single seat; at-large states use "00".
+const DELEGATE_FIPS = new Set(['11', '60', '66', '69', '72', '78']);
+
+// "ny-12" -> { stateCode: "36", district: 12 };  "wy" -> { stateCode: "56", district: 0 }
+function parseDistrictCode(code) {
+  const m = /^([a-z]{2})(?:-(\d{1,2}))?$/.exec(String(code || '').toLowerCase());
+  const stateCode = m && POSTAL_TO_FIPS[m[1]];
+  if (!stateCode) return null;
+  const single = m[2] == null;
+  const district = single ? (DELEGATE_FIPS.has(stateCode) ? 98 : 0) : Number(m[2]);
+  if (!single && (district < 1 || district > 60)) return null;
+  return { stateCode, district };
+}
+
+// The reverse: what goes in the page address for a district.
+function districtCode(stateCode, district, atLarge) {
+  const postal = FIPS_TO_POSTAL[stateCode];
+  if (!postal) return null;
+  return atLarge ? postal : `${postal}-${district}`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === '/api/lookup') return lookup(url, request, env);
     if (url.pathname === '/api/district') return district(url, ctx);
-    return reply(404, { error: 'not_found', message: 'Nothing here.' });
+
+    // A district page such as /ny-12: the normal page, with a link preview
+    // (title, description, photo) for chat apps and social media.
+    const code = url.pathname.replace(/^\/|\/$/g, '');
+    if (parseDistrictCode(code)) return districtPage(url, env, code.toLowerCase());
+
+    // Anything else: a friendly "page not found" page instead of raw data.
+    return notFoundPage(url, env);
   },
 };
+
+async function notFoundPage(url, env) {
+  const res = await env.ASSETS.fetch(new Request(new URL('/404.html', url)));
+  return new Response(res.body, { status: 404, headers: { 'content-type': 'text/html; charset=utf-8' } });
+}
+
+const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+async function districtPage(url, env, code) {
+  const page = await (await env.ASSETS.fetch(new Request(new URL('/', url)))).text();
+  const { stateCode, district } = parseDistrictCode(code);
+  let title = 'RepTracker', description = 'Bills sponsored and votes cast since 2023.', image = null;
+  try {
+    const index = await (await env.ASSETS.fetch(new Request(new URL('/data/index.json', url)))).json();
+    // "/ny" alone isn't a district: New York has many seats.
+    if (!code.includes('-') && (index.states?.[stateCode] || []).length > 1) return notFoundPage(url, env);
+    const rep = findRep(index, stateCode, district);
+    const label = code.toUpperCase();
+    if (rep) {
+      const [last, first] = rep.name.split(', ');
+      title = `${first ? `${first} ${last}` : rep.name} (${label}) · RepTracker`;
+      description = `Bills sponsored and House votes cast since 2023 by the representative for ${label}.`;
+      const member = await (await env.ASSETS.fetch(new Request(new URL(`/data/members/${rep.bioguideId}.json`, url)))).json();
+      image = member.photo || null;
+    } else {
+      title = `${label} · RepTracker`;
+      description = `No current representative was found for ${label}. The seat may be vacant.`;
+    }
+  } catch { /* fall back to the general preview */ }
+
+  const html = page
+    .replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)}</title>`)
+    .replace(/(<meta property="og:title" content=")[^"]*/, `$1${escapeHtml(title)}`)
+    .replace(/(<meta property="og:description" content=")[^"]*/, `$1${escapeHtml(description)}`)
+    .replace(/(<meta name="description" content=")[^"]*/, `$1${escapeHtml(description)}`)
+    .replace(/(<meta property="og:url" content=")[^"]*/, `$1${escapeHtml(url.origin + '/' + code)}`)
+    .replace('<!--og:image-->', image ? `<meta property="og:image" content="${escapeHtml(image)}">` : '');
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=3600' } });
+}
+
+// Who represents a district right now, from data/index.json.
+function findRep(index, stateCode, district) {
+  const inState = index.states?.[stateCode] || [];
+  // One seat in this state or territory: that person represents the whole place.
+  if (inState.length === 1) return inState[0];
+  // Otherwise match on the district the person represents NOW. (Searching
+  // Congress.gov by district also returns people who held it in the past.)
+  return inState.find(p => Number(p.district) === district) || null;
+}
 
 // ---------------------------------------------------------------------------
 // District outline for the map. Outlines are public and rarely change, so
@@ -42,7 +134,9 @@ const TIGERWEB = 'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/
 async function district(url, ctx) {
   const geoid = url.searchParams.get('geoid') || '';
   const layerName = url.searchParams.get('layer') || '';
-  if (!/^\d{4}$/.test(geoid) || !/^\d{2,3}(st|nd|rd|th) Congressional Districts$/i.test(layerName)) {
+  // The layer name is optional: district pages (/ny-12) don't have one, and
+  // then the newest set of congressional districts is used.
+  if (!/^\d{4}$/.test(geoid) || (layerName && !/^\d{2,3}(st|nd|rd|th) Congressional Districts$/i.test(layerName))) {
     return reply(400, { error: 'bad_request', message: 'Unknown district.' });
   }
 
@@ -55,7 +149,10 @@ async function district(url, ctx) {
     // Find the map layer with the same name the address lookup used
     // (its number changes when the Census adds a new Congress's districts).
     const info = await (await fetch(`${TIGERWEB}?f=json`, { signal: AbortSignal.timeout(20_000) })).json();
-    const layer = (info.layers || []).find(l => l.name?.toLowerCase() === layerName.toLowerCase());
+    const cdLayers = (info.layers || []).filter(l => /^\d{2,3}(st|nd|rd|th) Congressional Districts$/i.test(l.name || ''));
+    const layer = layerName
+      ? cdLayers.find(l => l.name.toLowerCase() === layerName.toLowerCase())
+      : cdLayers.sort((a, b) => parseInt(b.name) - parseInt(a.name))[0];
     if (!layer) throw new Error('layer not found');
 
     const q = new URL(`${TIGERWEB}/${layer.id}/query`);
@@ -113,6 +210,25 @@ function reply(status, body) {
 // The second helps where the Census address list is missing newer
 // addresses, such as rural 911 addresses.
 async function lookup(url, request, env) {
+  // A district page (/ny-12) asks by district code; no Census lookup needed.
+  const code = url.searchParams.get('code');
+  if (code != null) {
+    const parsed = parseDistrictCode(code);
+    if (!parsed) return reply(404, { error: 'unknown_district', message: "That district doesn't exist. Look up your representative by address instead." });
+    const atLarge = parsed.district === 0 || parsed.district === 98;
+    return finishLookup(url, env, {
+      matchedAddress: null,
+      byLocation: false,
+      coordinates: null,
+      stateCode: parsed.stateCode,
+      districtName: atLarge ? null : `Congressional District ${parsed.district}`,
+      district: parsed.district,
+      atLarge,
+      geoid: `${parsed.stateCode}${String(parsed.district).padStart(2, '0')}`,
+      districtSource: null,
+    }, true);
+  }
+
   const address = (url.searchParams.get('address') || '').trim();
   const latText = url.searchParams.get('lat');
   const lonText = url.searchParams.get('lon');
@@ -184,7 +300,7 @@ async function lookup(url, request, env) {
   const district = /^\d+$/.test(districtCode) ? Number(districtCode) : null;
   const atLarge = district === 0 || district === 98 || /at large/i.test(cd.NAME || '');
 
-  const result = {
+  return finishLookup(url, env, {
     matchedAddress: match.matchedAddress || null,
     byLocation: byPoint,
     coordinates: match.coordinates ? { lon: match.coordinates.x, lat: match.coordinates.y } : null,
@@ -194,10 +310,11 @@ async function lookup(url, request, env) {
     atLarge,
     geoid: String(cd.GEOID),
     districtSource: cdLayer,
-    representative: null,
-  };
+  }, false);
+}
 
-  // ---- 2. District -> representative (our own data/index.json) ----
+// ---- 2. District -> representative (our own data/index.json) ----
+async function finishLookup(url, env, result, fromCode) {
   let index;
   try {
     const res = await env.ASSETS.fetch(new Request(new URL('/data/index.json', url)));
@@ -207,19 +324,15 @@ async function lookup(url, request, env) {
     return reply(500, { error: 'data_unavailable', message: 'Our representative data could not be loaded. Please try again later.' });
   }
   result.dataUpdated = index.updated || null;
+  result.representative = null;
 
-  const inState = index.states?.[stateCode] || [];
-  let rep = null;
-  if (inState.length === 1) {
-    // One seat in this state or territory (an at-large state, DC, or a
-    // territory): that person represents the whole place.
-    rep = inState[0];
-  } else {
-    // Match on the district the person represents NOW. (Searching Congress.gov
-    // by district also returns people who held it in the past.)
-    const found = inState.filter(p => Number(p.district) === district);
-    if (found.length >= 1) rep = found[0];
+  const inState = index.states?.[result.stateCode] || [];
+  // "/ny" alone isn't a district: New York has many seats.
+  if (fromCode && result.atLarge && inState.length > 1) {
+    return reply(404, { error: 'unknown_district', message: "That district doesn't exist. Look up your representative by address instead." });
   }
+  result.code = districtCode(result.stateCode, result.district, result.atLarge);
+  const rep = findRep(index, result.stateCode, result.district);
 
   if (rep) {
     result.representative = { bioguideId: rep.bioguideId, name: rep.name };

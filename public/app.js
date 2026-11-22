@@ -1,12 +1,15 @@
 // ============================================================================
-// House Bill Tracker — the code that runs in the visitor's browser
+// RepTracker — the code that runs in the visitor's browser
 // ----------------------------------------------------------------------------
-// 1. Sends the address to our back end (/api/lookup) to find the district
-//    and representative.
+// 1. Finds the district and representative, by street address, by the
+//    visitor's location, by a spot picked on a map, or from a district page
+//    address like /ny-12.
 // 2. Loads that representative's file plus the shared vote and bill lists
 //    made by the nightly job, and puts them together into one row per bill.
-// 3. Shows the representative, the district map, contact details and the
-//    bill table, with filters.
+// 3. Shows the representative (with a short snapshot), the district map,
+//    contact details and the bill list, with filters.
+// 4. Gives every result its own shareable link (/ny-12). The link never
+//    contains a street address.
 // ============================================================================
 
 const $ = id => document.getElementById(id);
@@ -15,11 +18,13 @@ const PAGE_SIZE = 50;
 let allRows = [];    // every bill for this representative
 let shownCount = PAGE_SIZE;
 let map = null;
+let current = null;  // the district currently shown: { code, title }
 
 // ---------- Small helpers ---------------------------------------------------
 
 // "2025-03-14" -> "03/2025"
 const monthYear = d => (d ? `${d.slice(5, 7)}/${d.slice(0, 4)}` : '');
+const number = n => Number(n).toLocaleString('en-US');
 
 // Builds an element: el('a', { href: '...' }, 'text', otherElement)
 function el(tag, attrs = {}, ...children) {
@@ -69,10 +74,10 @@ function ordinal(n) {
 
 // "119-hr-9497" -> label "H.R. 9497" and its Congress.gov pages
 function billInfo(id) {
-  const [congress, type, number] = id.split('-');
+  const [congress, type, num] = id.split('-');
   const [label, slug] = BILL_TYPES[type] || [type.toUpperCase(), null];
-  const page = slug ? `https://www.congress.gov/bill/${ordinal(Number(congress))}-congress/${slug}/${number}` : null;
-  return { label: `${label} ${number}`, congress: Number(congress), summaryUrl: page, textUrl: page && `${page}/text` };
+  const page = slug ? `https://www.congress.gov/bill/${ordinal(Number(congress))}-congress/${slug}/${num}` : null;
+  return { label: `${label} ${num}`, congress: Number(congress), summaryUrl: page, textUrl: page && `${page}/text` };
 }
 
 // Procedural "rules": resolutions that set the terms of debate for other bills.
@@ -82,6 +87,30 @@ const RULE_TITLE = /^(providing for|relating to) (the )?(further )?consideration
 // bill, accept the Senate's changes, or override a veto. If there was none,
 // the latest vote of any kind.
 const FINAL_VOTE = /passage|suspend the rules and (pass|agree)|agreeing to the resolution|concur|override/i;
+
+// Plain-language names for the House's official motion wording.
+// "Fast-track" = "suspension of the rules": quicker, but needs two-thirds to pass.
+function voteLabel(question) {
+  const q = (question || '').toLowerCase();
+  let label;
+  if (/override|objections of the president/.test(q)) label = 'Overriding a veto';
+  else if (/concur/.test(q)) label = "Accepting the Senate's changes";
+  else if (/conference report/.test(q)) label = 'The final compromise version';
+  else if (/passage|and pass/.test(q)) label = 'Final passage';
+  else if (/agree(ing)? to the resolution|rules and agree/.test(q)) label = 'Approving the resolution';
+  else if (/amendment/.test(q)) label = 'An amendment';
+  else if (/recommit/.test(q)) label = 'Sending it back to committee';
+  else if (/previous question/.test(q)) label = 'Ending debate (procedural)';
+  else if (/table/.test(q)) label = 'Setting it aside (procedural)';
+  else if (/consideration/.test(q)) label = 'Whether to take it up (procedural)';
+  else if (/instruct/.test(q)) label = 'Instructions to negotiators';
+  else if (/refer/.test(q)) label = 'Sending it to committee';
+  else label = (question || 'A vote').replace(/^on (the )?/i, '');
+  return /suspend the rules/.test(q) ? `${label}, fast-track` : label;
+}
+
+// "Passed", "Failed", "Agreed to", "Not Agreed to" -> lower case for sentences.
+const resultText = r => (r ? String(r).toLowerCase() : '');
 
 function voteClass(position) {
   const p = (position || '').toLowerCase();
@@ -111,25 +140,22 @@ function buildRows(member, votes, bills) {
     row.sponsoredDate = date;
   }
 
-  // member.votes: { vote key: position }; votes[key] = [date, question, bill ID]
+  // member.votes: { vote key: position }; votes[key] = [date, question, bill ID, result]
   for (const [key, position] of Object.entries(member.votes || {})) {
     const v = votes[key];
     if (!v || !v[2]) continue;
-    rowFor(v[2]).votes.push({ date: v[0], question: v[1], position });
+    rowFor(v[2]).votes.push({ date: v[0], question: v[1], result: v[3] || null, position });
   }
 
   return [...rows.values()].map(row => {
     row.votes.sort((a, b) => a.date.localeCompare(b.date));
     const final = row.votes.filter(v => FINAL_VOTE.test(v.question)).at(-1) || row.votes.at(-1) || null;
-    const sponsored = Boolean(row.sponsoredDate);
-    const voted = row.votes.length > 0;
     return {
       ...row,
       ...billInfo(row.id),
       final,
-      sponsored,
-      voted,
-      role: sponsored && voted ? 'Sponsored and voted' : sponsored ? 'Sponsored' : 'Voted',
+      sponsored: Boolean(row.sponsoredDate),
+      voted: row.votes.length > 0,
       isRule: RULE_TITLE.test(row.title || ''),
       latest: [final?.date, row.sponsoredDate].filter(Boolean).sort().at(-1) || '',
     };
@@ -137,6 +163,21 @@ function buildRows(member, votes, bills) {
 }
 
 // ---------- Filters ---------------------------------------------------------
+
+const DEFAULTS = { 'f-period': '2023', 'f-role': 'any', 'f-subject': '', 'f-order': 'new' };
+
+function filtersActive() {
+  return Object.entries(DEFAULTS).some(([id, v]) => $(id).value !== v)
+    || $('f-rules').checked || $('f-search').value.trim() !== '';
+}
+
+function clearFilters() {
+  for (const [id, v] of Object.entries(DEFAULTS)) $(id).value = v;
+  $('f-rules').checked = false;
+  $('f-search').value = '';
+  shownCount = PAGE_SIZE;
+  renderTable();
+}
 
 function filteredRows() {
   const period = $('f-period').value;
@@ -160,11 +201,57 @@ function filteredRows() {
 
 function fillSubjects() {
   const subjects = [...new Set(allRows.map(r => r.subject).filter(Boolean))].sort();
-  const select = $('f-subject');
-  select.replaceChildren(el('option', { value: '' }, 'All subjects'), ...subjects.map(s => el('option', { value: s }, s)));
+  $('f-subject').replaceChildren(el('option', { value: '' }, 'All subjects'), ...subjects.map(s => el('option', { value: s }, s)));
 }
 
-// ---------- Draw the bill table ---------------------------------------------
+// How many of the tucked-away filters are changed, shown on the button.
+function updateMoreFiltersButton() {
+  const n = ['f-period', 'f-role', 'f-order'].filter(id => $(id).value !== DEFAULTS[id]).length + ($('f-rules').checked ? 1 : 0);
+  $('more-filters').textContent = n ? `More filters (${n})` : 'More filters';
+}
+
+// ---------- Draw the bill list ----------------------------------------------
+
+const LONG_TITLE = 140;   // characters; longer titles are cut to two lines
+
+function billCell(r) {
+  const long = (r.title || '').length > LONG_TITLE;
+  const title = r.title
+    ? (r.summaryUrl
+        ? el('a', { class: 'bill-title', href: r.summaryUrl, target: '_blank', rel: 'noopener' }, r.title)
+        : el('span', { class: 'bill-title' }, r.title))
+    : el('span', { class: 'bill-title untitled' }, 'Title not yet available');
+  return el('td', { class: 'cell-bill' },
+    el('div', { class: long ? 'title-wrap clamped' : 'title-wrap' }, title),
+    long && el('button', {
+      type: 'button', class: 'text-button small', 'aria-expanded': 'false',
+      onclick: e => {
+        const wrap = e.currentTarget.previousElementSibling;
+        const open = wrap.classList.toggle('clamped') === false;
+        e.currentTarget.setAttribute('aria-expanded', String(open));
+        e.currentTarget.textContent = open ? 'Show less' : 'Show full title';
+      },
+    }, 'Show full title'),
+    el('p', { class: 'bill-meta' },
+      r.sponsored && el('span', { class: 'badge' }, 'Sponsored'),
+      el('span', {}, r.label),
+      r.subject && el('span', {}, r.subject),
+      r.textUrl && el('a', { href: r.textUrl, target: '_blank', rel: 'noopener' }, 'Full text')));
+}
+
+function voteCell(r) {
+  if (!r.final) return el('td', { class: 'cell-vote' }, el('span', { class: 'no-vote' }, 'No House vote yet'));
+  const what = voteLabel(r.final.question);
+  return el('td', { class: 'cell-vote' },
+    el('span', { class: `vote ${voteClass(r.final.position)}` }, r.final.position),
+    el('span', { class: 'vote-on' },
+      `on ${what.charAt(0).toLowerCase()}${what.slice(1)}`,
+      r.final.result && el('span', { class: 'vote-result' }, ` · ${resultText(r.final.result)}`)),
+    el('button', {
+      type: 'button', class: 'text-button small', 'aria-expanded': 'false',
+      onclick: e => toggleVotes(e.currentTarget, r),
+    }, r.votes.length === 1 ? 'See the vote ▾' : `See all ${r.votes.length} votes ▾`));
+}
 
 function renderTable() {
   const list = filteredRows();
@@ -172,38 +259,27 @@ function renderTable() {
   body.replaceChildren();
 
   for (const r of list.slice(0, shownCount)) {
-    const voteCell = r.final
-      ? el('td', { 'data-label': 'Vote' },
-          el('span', { class: `vote ${voteClass(r.final.position)}` }, r.final.position),
-          r.votes.length > 1 || r.final
-            ? el('button', {
-                type: 'button', class: 'all-votes-btn', 'aria-expanded': 'false',
-                onclick: e => toggleVotes(e.currentTarget, r),
-              }, r.votes.length === 1 ? 'See the vote' : `See all ${r.votes.length} votes`)
-            : null)
-      : el('td', { 'data-label': 'Vote' }, el('span', { class: 'no-vote' }, 'No House vote'));
-
     body.append(el('tr', { class: 'bill-row' },
-      el('td', { class: 'cell-bill', 'data-label': 'Bill' },
-        el('span', { class: 'bill-label' }, r.label),
-        el('p', { class: r.title ? 'bill-title' : 'bill-title untitled' }, r.title || 'Title not yet available')),
-      el('td', { 'data-label': 'Role' }, r.role),
-      voteCell,
-      el('td', { 'data-label': 'Date' },
+      billCell(r),
+      voteCell(r),
+      el('td', { class: 'cell-date' },
         r.sponsoredDate && el('span', { class: 'date-line' }, el('span', {}, 'Sponsored '), monthYear(r.sponsoredDate)),
         r.final && el('span', { class: 'date-line' }, el('span', {}, 'Voted '), monthYear(r.final.date))),
-      el('td', { 'data-label': 'Subject', class: 'subject' }, r.subject || '—'),
-      el('td', { 'data-label': 'Read', class: 'read' },
-        r.summaryUrl && el('a', { href: r.summaryUrl, target: '_blank', rel: 'noopener' }, 'Summary'),
-        r.textUrl && el('a', { href: r.textUrl, target: '_blank', rel: 'noopener' }, 'Full text')),
     ));
   }
 
   const total = list.length;
   $('count').textContent = total === 0 ? '' :
-    total <= shownCount ? `${total} bill${total === 1 ? '' : 's'}` : `Showing ${shownCount} of ${total} bills`;
-  $('empty').hidden = total > 0;
+    `${total <= shownCount ? `${number(total)} bill${total === 1 ? '' : 's'}` : `Showing ${shownCount} of ${number(total)} bills`} · votes updated nightly`;
+  $('bill-table').hidden = total === 0;
   $('more').hidden = total <= shownCount;
+  $('clear-filters').hidden = !filtersActive();
+  updateMoreFiltersButton();
+
+  // Nothing matches: say what was searched, and offer a way out.
+  const words = $('f-search').value.trim();
+  $('empty').hidden = total > 0;
+  $('empty-text').textContent = words ? `No bills match “${words}” with these filters.` : 'No bills match these filters.';
 }
 
 // Opens or closes the list of every vote on one bill, just under its row.
@@ -213,18 +289,22 @@ function toggleVotes(button, r) {
   if (open) {
     row.nextElementSibling?.classList.contains('vote-list-row') && row.nextElementSibling.remove();
     button.setAttribute('aria-expanded', 'false');
+    button.textContent = button.textContent.replace('▴', '▾');
     return;
   }
   const items = [...r.votes].reverse().map(v =>
     el('li', {},
       el('span', { class: 'when' }, monthYear(v.date)),
-      el('span', {}, v.question || 'Vote'),
+      el('span', { class: 'what' },
+        el('span', {}, voteLabel(v.question), v.result && el('span', { class: 'vote-result' }, ` · ${resultText(v.result)}`)),
+        el('span', { class: 'official' }, v.question || '')),
       el('span', { class: `vote ${voteClass(v.position)}` }, v.position)));
-  row.after(el('tr', { class: 'vote-list-row' }, el('td', { colspan: '6' }, el('ul', { class: 'vote-list' }, items))));
+  row.after(el('tr', { class: 'vote-list-row' }, el('td', { colspan: '3' }, el('ul', { class: 'vote-list' }, items))));
   button.setAttribute('aria-expanded', 'true');
+  button.textContent = button.textContent.replace('▾', '▴');
 }
 
-// ---------- Representative, contact, map ------------------------------------
+// ---------- Representative, snapshot, contact, map --------------------------
 
 function districtLabel(info, member) {
   if (info.atLarge) return member?.state ? `${member.state}, whole state or territory` : 'Whole state or territory';
@@ -243,14 +323,34 @@ function showMember(info, member) {
   $('rep-role').textContent = `${title} for ${districtLabel(info, member)}`;
   $('rep-name').textContent = name;
   $('rep-party').textContent = member.party || '';
-  $('rep-address').textContent = info.matchedAddress ? `Matched address: ${info.matchedAddress}`
-    : info.locationLabel ? `Looked up from: ${info.locationLabel.toLowerCase()}` : '';
+
+  // Where the lookup started, in normal case (the Census sends capitals).
+  const tidy = s => s.toLowerCase().replace(/\b([a-z])/g, c => c.toUpperCase()).replace(/, ([A-Z][a-z]),/g, (m, st) => `, ${st.toUpperCase()},`);
+  $('rep-address-text').textContent = info.matchedAddress ? `Matched address: ${tidy(info.matchedAddress)}`
+    : info.locationLabel ? `Looked up from ${info.locationLabel.toLowerCase()}` : '';
+  $('rep-address').hidden = !info.matchedAddress && !info.locationLabel;
 
   const photo = $('rep-photo');
   if (member.photo) { photo.src = member.photo; photo.alt = `Official photo of ${name}`; photo.hidden = false; }
   else photo.hidden = true;
 
-  $('c-phone').replaceChildren(member.phone ? el('a', { href: `tel:${member.phone.replace(/[^\d+]/g, '')}` }, member.phone) : 'Not listed');
+  // Snapshot: four plain counts from data already loaded.
+  const positions = Object.values(member.votes || {});
+  const missed = positions.filter(p => /not voting/i.test(p)).length;
+  const cast = positions.length - missed;
+  const stats = [
+    member.houseSince && [String(member.houseSince), 'In the House since'],
+    [number((member.sponsored || []).length), 'Bills sponsored, whole career'],
+    [number(cast), 'Votes cast on bills since 2023'],
+    [number(missed), 'Votes missed (“Not Voting”)'],
+  ].filter(Boolean);
+  $('snapshot').replaceChildren(...stats.map(([value, label]) =>
+    el('div', { class: 'stat' }, el('span', { class: 'stat-value' }, value), el('span', { class: 'stat-label' }, label))));
+
+  const phone = member.phone ? member.phone.replace(/[^\d+]/g, '') : null;
+  $('c-phone').replaceChildren(member.phone ? el('a', { href: `tel:${phone}` }, member.phone) : 'Not listed');
+  $('call-button').hidden = !phone;
+  if (phone) $('call-button').href = `tel:${phone}`;
   $('c-office').textContent = member.office || 'Not listed';
   $('c-web').replaceChildren(member.website
     ? el('a', { href: member.website, target: '_blank', rel: 'noopener' }, member.website.replace(/^https?:\/\//, '').replace(/\/$/, ''))
@@ -271,16 +371,17 @@ function crossDateLine(shape) {
 async function showMap(info) {
   const caption = $('map-caption');
   caption.textContent = info.districtName || '';
-  if (!window.maplibregl || !info.coordinates) {
+  if (!window.maplibregl) {
     $('map').replaceChildren(el('p', { class: 'fine', style: 'padding:16px' }, 'The map could not be loaded.'));
     return;
   }
-  const center = [info.coordinates.lon, info.coordinates.lat];
+  // District pages (/ny-12) have no address, so no pin; the outline sets the view.
+  const center = info.coordinates ? [info.coordinates.lon, info.coordinates.lat] : [-98.5, 39.8];
   if (!map) {
     map = new maplibregl.Map({
       container: 'map',
       style: 'https://tiles.openfreemap.org/styles/liberty',
-      center, zoom: 9,
+      center, zoom: info.coordinates ? 9 : 3,
       attributionControl: { compact: true },
       cooperativeGestures: true,   // scroll the page normally; use two fingers or Ctrl to zoom the map
     });
@@ -291,11 +392,14 @@ async function showMap(info) {
   for (const id of ['district-fill', 'district-line']) if (map.getLayer(id)) map.removeLayer(id);
   if (map.getSource('district')) map.removeSource('district');
   map._marker?.remove();
-  map._marker = new maplibregl.Marker({ color: getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#0B5D5E' })
-    .setLngLat(center).addTo(map);
+  map._marker = null;
+  if (info.coordinates) {
+    map._marker = new maplibregl.Marker({ color: '#0B5D5E' }).setLngLat(center).addTo(map);
+  }
 
   try {
-    const q = new URLSearchParams({ geoid: info.geoid, layer: info.districtSource || '' });
+    const q = new URLSearchParams({ geoid: info.geoid });
+    if (info.districtSource) q.set('layer', info.districtSource);
     const shape = crossDateLine(await getJson(`/api/district?${q}`));
     map.addSource('district', { type: 'geojson', data: shape });
     map.addLayer({ id: 'district-fill', type: 'fill', source: 'district', paint: { 'fill-color': '#0B5D5E', 'fill-opacity': 0.12 } });
@@ -304,21 +408,28 @@ async function showMap(info) {
     for (const poly of shape.geometry.coordinates) for (const ring of poly) for (const pt of ring) bounds.extend(pt);
     map.fitBounds(bounds, { padding: 24, duration: 0 });
   } catch {
-    map.jumpTo({ center, zoom: 11 });
-    caption.textContent = `${info.districtName || ''}. The district outline couldn't be loaded; the pin shows the address.`;
+    map.jumpTo({ center, zoom: info.coordinates ? 11 : 3 });
+    caption.textContent = `${info.districtName || ''}. The district outline couldn't be loaded.`;
   }
 }
 
 // ---------- The lookup ------------------------------------------------------
 
-// "query" is either { address } or { lat, lon }.
-async function lookup(query) {
+// "query" is { address }, { lat, lon }, or { code } (a district page like ny-12).
+async function lookup(query, { fromPage = false } = {}) {
   $('go').disabled = true;
-  setStatus('Looking up your district…');
+  setStatus('Looking up the district…');
   try {
     const { label, ...params } = query;   // the label is for this page only, not sent anywhere
     const info = await getJson(`/api/lookup?${new URLSearchParams(params)}`);
     if (label) info.locationLabel = label;
+
+    // Give the result its own address (/ny-12) so it can be bookmarked,
+    // shared, and survives a refresh. Never the street address.
+    if (info.code && !fromPage && location.pathname !== `/${info.code}`) {
+      history.pushState({ code: info.code }, '', `/${info.code}`);
+    }
+
     if (!info.representative) {
       $('results').hidden = true;
       setStatus(`${info.districtName || 'This district'}: ${info.note || 'no current representative was found.'}`, true);
@@ -334,6 +445,10 @@ async function lookup(query) {
     ]);
 
     showMember(info, member);
+    const [last, first] = (member.name || '').split(', ');
+    current = { code: info.code, title: `${first ? `${first} ${last}` : member.name} (${(info.code || '').toUpperCase()}) · RepTracker` };
+    document.title = current.title;
+
     allRows = buildRows(member, votes, bills);
     fillSubjects();
     shownCount = PAGE_SIZE;
@@ -347,7 +462,7 @@ async function lookup(query) {
       ? 'Contact details and sponsored bills for this representative are still being collected and will appear within a day.'
       : '');
     showMap(info);   // the map loads in the background
-    $('rep-name').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    if (!fromPage) $('rep-name').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   } catch (err) {
     $('results').hidden = true;
     setStatus(err.message || 'Something went wrong. Please try again.', true);
@@ -356,12 +471,62 @@ async function lookup(query) {
   }
 }
 
-// ---------- Wire up the page ------------------------------------------------
+// ---------- Address form ----------------------------------------------------
 
 $('lookup').addEventListener('submit', e => {
   e.preventDefault();
-  lookup({ address: $('address').value.trim() });
+  const address = $('address').value.trim();
+  if (!address) {
+    // Our own message, in place of the browser's "Please fill out this field".
+    $('address').setAttribute('aria-invalid', 'true');
+    setStatus('Enter your street address to find your representative.', true);
+    $('address').focus();
+    return;
+  }
+  $('address').removeAttribute('aria-invalid');
+  lookup({ address });
 });
+$('address').addEventListener('input', () => $('address').removeAttribute('aria-invalid'));
+
+// "Not your address?" jumps back to the box.
+$('change-address').addEventListener('click', () => {
+  window.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  $('address').focus();
+  $('address').select();
+});
+
+// ---------- Share -----------------------------------------------------------
+
+$('share').addEventListener('click', async () => {
+  const url = location.href;
+  try {
+    if (navigator.share) { await navigator.share({ title: current?.title || document.title, url }); return; }
+    await navigator.clipboard.writeText(url);
+    $('share-note').textContent = 'Link copied.';
+  } catch {
+    $('share-note').textContent = url;   // fallback: show the link to copy by hand
+  }
+  setTimeout(() => { $('share-note').textContent = ''; }, 4000);
+});
+
+// ---------- Filters ---------------------------------------------------------
+
+for (const id of ['f-period', 'f-role', 'f-subject', 'f-order', 'f-rules']) {
+  $(id).addEventListener('change', () => { shownCount = PAGE_SIZE; renderTable(); });
+}
+let typing;
+$('f-search').addEventListener('input', () => {
+  clearTimeout(typing);
+  typing = setTimeout(() => { shownCount = PAGE_SIZE; renderTable(); }, 200);
+});
+$('more').addEventListener('click', () => { shownCount += PAGE_SIZE; renderTable(); });
+$('more-filters').addEventListener('click', () => {
+  const open = $('filter-panel').hidden;
+  $('filter-panel').hidden = !open;
+  $('more-filters').setAttribute('aria-expanded', String(open));
+});
+$('clear-filters').addEventListener('click', clearFilters);
+$('empty-clear').addEventListener('click', clearFilters);
 
 // ---------- Without an address: current location or a spot on the map -------
 
@@ -413,12 +578,34 @@ $('pick-on-map').addEventListener('click', () => {
   });
 });
 
-for (const id of ['f-period', 'f-role', 'f-subject', 'f-order', 'f-rules']) {
-  $(id).addEventListener('change', () => { shownCount = PAGE_SIZE; renderTable(); });
+// ---------- District pages and the Back button -----------------------------
+
+// /ny-12, /wy, /dc ... ; anything else is the home page.
+const codeFromPath = () => {
+  const m = /^\/([a-z]{2}(?:-\d{1,2})?)\/?$/i.exec(location.pathname);
+  return m ? m[1].toLowerCase() : null;
+};
+
+function showHome() {
+  $('results').hidden = true;
+  setStatus('');
+  document.title = 'RepTracker · Track your House Representative’s Activity on Capitol Hill';
+  current = null;
 }
-let typing;
-$('f-search').addEventListener('input', () => {
-  clearTimeout(typing);
-  typing = setTimeout(() => { shownCount = PAGE_SIZE; renderTable(); }, 200);
+
+window.addEventListener('popstate', () => {
+  const code = codeFromPath();
+  if (code) lookup({ code }, { fromPage: true }); else showHome();
 });
-$('more').addEventListener('click', () => { shownCount += PAGE_SIZE; renderTable(); });
+
+// On arrival: a district page loads its result; the home page focuses the box
+// on computers (on phones that would pop up the keyboard straight away).
+{
+  const code = codeFromPath();
+  // An address typed on the "page not found" page is handed over once, then forgotten.
+  let handed = null;
+  try { handed = sessionStorage.getItem('rt-address'); sessionStorage.removeItem('rt-address'); } catch { /* storage blocked */ }
+  if (code) lookup({ code }, { fromPage: true });
+  else if (handed) { $('address').value = handed; lookup({ address: handed }); }
+  else if (matchMedia('(pointer: fine) and (min-width: 701px)').matches) $('address').focus();
+}
